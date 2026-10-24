@@ -31,7 +31,7 @@ INTERVAL = "FIVE_MINUTE"
 IST = ZoneInfo("Asia/Kolkata")
 
 # Change the year you want to analyze.
-SELECTED_YEAR = 2026
+SELECTED_YEAR = 2020
 
 MAX_RETRIES = 4
 RETRY_BASE_SECONDS = 2
