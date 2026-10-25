@@ -1,716 +1,502 @@
 
 import os
-import warnings
-import joblib
 import numpy as np
 import pandas as pd
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    confusion_matrix,
-)
-
-warnings.filterwarnings("ignore")
+from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
 CSV_PATH = r".\Historic_5Min_CandlesData_2016_2026.csv"
+OUT_DIR = "nifty_rule_conditions"
 
-OUTPUT_DIR = "nifty_ml_results"
+MIN_CONDITION_OCCURRENCES = 50
+TEST_RATIO = 0.30
 
-MODEL_PATH = os.path.join(
-    OUTPUT_DIR, "nifty_candle_model.joblib"
-)
-
-PREDICTIONS_PATH = os.path.join(
-    OUTPUT_DIR, "historical_predictions.csv"
-)
-
-RULE_REPORT_PATH = os.path.join(
-    OUTPUT_DIR, "rule_validation_report.csv"
-)
-
-TRAIN_RATIO = 0.80
-RANDOM_STATE = 42
-
-# Four input candles predict the fifth candle.
-WINDOW_SIZE = 4
-
-COLUMN_ALIASES = {
-    "open": ["open", "o"],
-    "high": ["high", "h"],
-    "low": ["low", "l"],
-    "close": ["close", "closing", "c"],
-    "volume": ["volume", "vol", "v"],
-    "datetime": [
-        "datetime", "date_time", "timestamp",
-        "date", "time", "dateandtime"
-    ],
-}
+os.makedirs(OUT_DIR, exist_ok=True)
 
 
 # ============================================================
-# YOUR EXISTING RULES
-#
-# These rules use Candle 2, Candle 3 and Candle 4
-# to predict Candle 5.
+# 1. LOAD HISTORICAL DATA
 # ============================================================
 
-RULES = {
-    ("Red", "Red", "Green"): "Red",
-    ("Green", "Green", "Red"): "Red",
-    ("Red", "Green", "Red"): "Red",
-    ("Green", "Red", "Green"): "Green",
-    ("Red", "Red", "Red"): "Red",
-    ("Green", "Green", "Green"): "Red",
-    ("Red", "Green", "Green"): "Red",
-    ("Green", "Red", "Red"): "Green",
-}
-
-
-# ============================================================
-# LOAD AND CLEAN CSV
-# ============================================================
-
-def load_data(path):
-    if not os.path.isfile(path):
-        raise FileNotFoundError(
-            f"CSV file not found: {os.path.abspath(path)}\n"
-            "Update CSV_PATH to the correct file location."
-        )
-
-    df = None
-
-    for encoding in [
-        "utf-8-sig", "utf-8", "cp1252", "latin1"
-    ]:
-        try:
-            df = pd.read_csv(path, encoding=encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-
-    if df is None:
-        raise ValueError("Could not decode the CSV file.")
-
-    # Normalize column names.
-    df.columns = [
-        str(c).strip().lower().replace(" ", "").replace("_", "")
-        for c in df.columns
-    ]
-
-    # Duplicate column names can cause ambiguous selections.
-    if df.columns.duplicated().any():
-        duplicates = df.columns[df.columns.duplicated()].tolist()
-        raise ValueError(
-            f"Duplicate columns after normalization: {duplicates}"
-        )
-
-    normalized_aliases = {
-        key: [
-            alias.lower().replace(" ", "").replace("_", "")
-            for alias in aliases
-        ]
-        for key, aliases in COLUMN_ALIASES.items()
-    }
-
-    columns = {}
-
-    for required in ["open", "high", "low", "close"]:
-        match = next(
-            (
-                col for col in df.columns
-                if col in normalized_aliases[required]
-            ),
-            None,
-        )
-
-        if match is None:
-            raise ValueError(
-                f"Missing required column: {required}\n"
-                f"Available columns: {list(df.columns)}"
-            )
-
-        columns[required] = match
-
-    for optional in ["volume", "datetime"]:
-        match = next(
-            (
-                col for col in df.columns
-                if col in normalized_aliases[optional]
-            ),
-            None,
-        )
-
-        if match is not None:
-            columns[optional] = match
-
-    df = df.rename(
-        columns={
-            original: standard
-            for standard, original in columns.items()
-        }
+if not os.path.exists(CSV_PATH):
+    raise FileNotFoundError(
+        f"CSV file not found: {CSV_PATH}\n"
+        "Update CSV_PATH at the top of this script."
     )
 
-    numeric_columns = ["open", "high", "low", "close"]
+df = pd.read_csv(CSV_PATH)
 
-    if "volume" in df.columns:
-        numeric_columns.append("volume")
+print("=" * 75)
+print("NIFTY RED-RED-GREEN CONDITION ANALYSIS")
+print("=" * 75)
+print("\nOriginal columns:", df.columns.tolist())
 
-    for col in numeric_columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=numeric_columns).copy()
+def find_column(*candidates, required=True):
+    lookup = {
+        str(c).strip().lower().replace(" ", "_"): c
+        for c in df.columns
+    }
 
-    # Validate OHLC prices.
-    df = df[
-        (df["open"] > 0)
-        & (df["high"] > 0)
-        & (df["low"] > 0)
-        & (df["close"] > 0)
-        & (
-            df["high"]
-            >= df[["open", "close", "low"]].max(axis=1)
-        )
-        & (
-            df["low"]
-            <= df[["open", "close", "high"]].min(axis=1)
-        )
-    ].copy()
+    for candidate in candidates:
+        key = candidate.strip().lower().replace(" ", "_")
+        if key in lookup:
+            return lookup[key]
 
-    # Sort chronologically before creating sequences.
-    if "datetime" in df.columns:
-        df["datetime"] = pd.to_datetime(
-            df["datetime"],
-            errors="coerce",
-            dayfirst=True,
-        )
-
-        df = df.dropna(subset=["datetime"])
-        df = df.sort_values("datetime")
-
-    df = df.drop_duplicates().reset_index(drop=True)
-
-    if len(df) < 100:
+    if required:
         raise ValueError(
-            f"Only {len(df)} valid rows found. "
-            "Check the CSV data."
+            f"Could not find column from {candidates}.\n"
+            f"Available columns: {df.columns.tolist()}"
         )
+    return None
 
-    print("\n========== DATA SUMMARY ==========")
-    print(f"File: {os.path.abspath(path)}")
-    print(f"Valid candles: {len(df):,}")
 
-    if "datetime" in df.columns:
-        print(f"Start: {df['datetime'].min()}")
-        print(f"End:   {df['datetime'].max()}")
+date_col = find_column("timestamp", "datetime", "date_time", "date")
+open_col = find_column("open")
+high_col = find_column("high")
+low_col = find_column("low")
+close_col = find_column("close")
+volume_col = find_column(
+    "volume", "vol", "qty", "quantity", required=False
+)
 
-    print(f"Columns: {list(df.columns)}")
+rename_map = {
+    date_col: "datetime",
+    open_col: "open",
+    high_col: "high",
+    low_col: "low",
+    close_col: "close",
+}
 
-    return df
+if volume_col is not None:
+    rename_map[volume_col] = "volume"
+
+df = df.rename(columns=rename_map)
+
+if "volume" not in df.columns:
+    df["volume"] = np.nan
+
+df["datetime"] = pd.to_datetime(
+    df["datetime"], errors="coerce"
+)
+
+for col in ["open", "high", "low", "close", "volume"]:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+df = (
+    df.dropna(subset=["datetime", "open", "high", "low", "close"])
+    .sort_values("datetime")
+    .drop_duplicates(subset=["datetime"])
+    .reset_index(drop=True)
+)
+
+if len(df) < 100:
+    raise ValueError("Not enough valid OHLC candles in the CSV.")
+
+print("\nValid candles:", f"{len(df):,}")
+print("First candle:", df["datetime"].iloc[0])
+print("Last candle:", df["datetime"].iloc[-1])
 
 
 # ============================================================
-# CANDLE LABELS AND FEATURES
+# 2. CALCULATE CANDLE FEATURES
 # ============================================================
 
-NUMERIC_FEATURES = [
+body = df["close"] - df["open"]
+candle_range = df["high"] - df["low"]
+safe_open = df["open"].replace(0, np.nan)
+
+# Green when close >= open; Red when close < open
+df["color"] = np.where(body >= 0, "Green", "Red")
+
+df["body_pct"] = 100 * body.abs() / safe_open
+df["range_pct"] = 100 * candle_range / safe_open
+
+df["upper_wick_pct"] = (
+    100
+    * (df["high"] - df[["open", "close"]].max(axis=1))
+    / safe_open
+)
+
+df["lower_wick_pct"] = (
+    100
+    * (df[["open", "close"]].min(axis=1) - df["low"])
+    / safe_open
+)
+
+# Volume ratio based only on previous candles
+volume_average = (
+    df["volume"]
+    .shift(1)
+    .rolling(window=20, min_periods=5)
+    .mean()
+)
+
+df["volume_ratio"] = (
+    df["volume"] / volume_average.replace(0, np.nan)
+)
+
+valid_volume_ratios = int(df["volume_ratio"].notna().sum())
+
+print("\nValid volume values:", int(df["volume"].notna().sum()))
+print("Valid volume-ratio values:", valid_volume_ratios)
+
+# Use body and wick features regardless of volume availability
+features_to_use = [
     "body_pct",
     "range_pct",
     "upper_wick_pct",
     "lower_wick_pct",
-    "log_volume",
 ]
 
-
-def prepare_candles(df):
-    df = df.copy()
-
-    # A doji (Close == Open) is classified as Red.
-    df["color"] = np.where(
-        df["close"] > df["open"],
-        "Green",
-        "Red",
-    )
-
-    safe_open = df["open"].replace(0, np.nan)
-
-    df["body_pct"] = (
-        (df["close"] - df["open"]) / safe_open * 100
-    )
-
-    df["range_pct"] = (
-        (df["high"] - df["low"]) / safe_open * 100
-    )
-
-    df["upper_wick_pct"] = (
-        (
-            df["high"]
-            - df[["open", "close"]].max(axis=1)
-        )
-        / safe_open
-        * 100
-    )
-
-    df["lower_wick_pct"] = (
-        (
-            df[["open", "close"]].min(axis=1)
-            - df["low"]
-        )
-        / safe_open
-        * 100
-    )
-
-    if "volume" in df.columns:
-        df["log_volume"] = np.log1p(
-            df["volume"].clip(lower=0)
-        )
-    else:
-        df["log_volume"] = 0.0
-
-    return df
+# Add volume only if there are enough valid ratios
+if valid_volume_ratios >= 100:
+    features_to_use.append("volume_ratio")
+    print("Volume analysis: ENABLED")
+else:
+    print("Volume analysis: DISABLED (insufficient valid ratios)")
 
 
 # ============================================================
-# BUILD FEATURES FOR FOUR INPUT CANDLES
-#
-# Candle 1 + Candle 2 + Candle 3 + Candle 4
-#                         |
-#                         v
-#                  Predict Candle 5
-#
-# The ML model uses all four candles.
-# The rules use only Candle 2, Candle 3 and Candle 4.
+# 3. BUILD CANDLE 1, CANDLE 2, CANDLE 3 FEATURES
 # ============================================================
 
-def make_feature_row(previous):
-    if len(previous) != WINDOW_SIZE:
-        raise ValueError(
-            f"Expected {WINDOW_SIZE} input candles."
-        )
+feature_names = []
 
-    row = {}
+# Each row represents Candle 4:
+# Candle 1 = 3 rows earlier
+# Candle 2 = 2 rows earlier
+# Candle 3 = 1 row earlier
+# Current row = Candle 4 outcome
 
-    for position, (_, candle) in enumerate(
-        previous.iterrows(),
-        start=1,
-    ):
-        row[f"color_{position}"] = (
-            1 if candle["color"] == "Green" else 0
-        )
+for candle_num, shift in [(1, 3), (2, 2), (3, 1)]:
 
-        for feature in NUMERIC_FEATURES:
-            row[f"{feature}_{position}"] = float(
-                candle[feature]
-            )
+    df[f"c{candle_num}_color"] = df["color"].shift(shift)
 
-    first_close = float(previous.iloc[0]["close"])
-    last_close = float(previous.iloc[-1]["close"])
+    for feature in features_to_use:
+        feature_name = f"c{candle_num}_{feature}"
+        df[feature_name] = df[feature].shift(shift)
+        feature_names.append(feature_name)
 
-    row["close_change_pct_1_to_4"] = (
-        (last_close - first_close) / first_close * 100
+
+# ============================================================
+# 4. FILTER RED -> RED -> GREEN
+# ============================================================
+
+pattern_mask = (
+    (df["c1_color"] == "Red")
+    & (df["c2_color"] == "Red")
+    & (df["c3_color"] == "Green")
+)
+
+data = df.loc[pattern_mask].copy()
+
+# Success: Candle 4 closes Red
+# Failure: Candle 4 closes Green
+data["success"] = (data["color"] == "Red").astype(int)
+
+print("\n" + "=" * 75)
+print("PATTERN DIAGNOSTICS")
+print("=" * 75)
+
+print("Matching Red-Red-Green patterns:", f"{len(data):,}")
+
+if len(data) == 0:
+    print("\nLast 15 candle colors:")
+    print(df[["datetime", "color"]].tail(15).to_string(index=False))
+    raise ValueError(
+        "No matching patterns found. Check the data and candle colors."
     )
 
-    return row
+# Replace infinite values, then drop rows missing only selected features
+data = data.replace([np.inf, -np.inf], np.nan)
+
+print("\nMissing values by feature:")
+print(data[feature_names].isna().sum().to_string())
+
+usable = data.dropna(
+    subset=feature_names + ["success"]
+).copy()
+
+print("\nUsable patterns:", f"{len(usable):,}")
+print("Excluded patterns:", f"{len(data) - len(usable):,}")
+
+if len(usable) < 100:
+    raise ValueError(
+        "Fewer than 100 usable patterns remain. "
+        "Review the missing-value report."
+    )
+
+data = usable.sort_values("datetime").reset_index(drop=True)
 
 
-def build_sequences(df):
-    feature_rows = []
-    metadata = []
+# ============================================================
+# 5. OVERALL SUCCESS AND FAILURE RATES
+# ============================================================
 
-    # i is the target candle index.
-    # i-4, i-3, i-2, i-1 are input candles.
-    # i is the candle being predicted.
-    for i in range(WINDOW_SIZE, len(df)):
-        previous = df.iloc[i - WINDOW_SIZE:i]
-        target = df.iloc[i]
+total = len(data)
+successes = int(data["success"].sum())
+failures = total - successes
 
-        # All four input candle colors.
-        colors = tuple(previous["color"].tolist())
+success_rate = 100 * successes / total
+failure_rate = 100 * failures / total
 
-        # The existing rules use the final three input candles.
-        rule_colors = colors[-3:]
+print("\n" + "=" * 75)
+print("OVERALL RESULTS")
+print("=" * 75)
 
-        feature_rows.append(make_feature_row(previous))
+print(f"Pattern: Red -> Red -> Green")
+print(f"Total usable occurrences: {total:,}")
+print(f"Success (Candle 4 Red): {successes:,} ({success_rate:.2f}%)")
+print(f"Failure (Candle 4 Green): {failures:,} ({failure_rate:.2f}%)")
 
-        metadata_row = {
-            "target_index": i,
-            "target_datetime": (
-                target["datetime"]
-                if "datetime" in df.columns
-                else i
-            ),
-            "actual_candle_5": target["color"],
-            "rule_prediction": RULES.get(rule_colors),
-            "pattern": " -> ".join(rule_colors),
-            "input_pattern_4": " -> ".join(colors),
-            "target_open": target["open"],
-            "target_high": target["high"],
-            "target_low": target["low"],
-            "target_close": target["close"],
-        }
 
-        # Keep explicit color columns for rule validation.
-        for position, color in enumerate(colors, start=1):
-            metadata_row[
-                f"candle_{position}_color"
-            ] = color
+# ============================================================
+# 6. INDIVIDUAL CONDITION ANALYSIS
+# ============================================================
 
-        metadata.append(metadata_row)
+condition_rows = []
 
-    X = pd.DataFrame(feature_rows)
-    meta = pd.DataFrame(metadata)
+for feature in feature_names:
 
-    X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
+    try:
+        buckets = pd.qcut(
+            data[feature],
+            q=4,
+            labels=["Lowest", "Low-Mid", "High-Mid", "Highest"],
+            duplicates="drop",
+        )
+    except (ValueError, TypeError):
+        print(f"Skipping feature that cannot be grouped: {feature}")
+        continue
 
-    y = meta["actual_candle_5"].map({
-        "Red": 0,
-        "Green": 1,
+    temp = pd.DataFrame({
+        "bucket": buckets,
+        "success": data["success"].values,
     })
 
-    if y.isna().any():
-        raise ValueError("Unexpected target labels found.")
+    for bucket, group in temp.groupby("bucket", observed=True):
 
-    y = y.astype(int)
+        count = len(group)
 
-    return X, y, meta
+        if count < MIN_CONDITION_OCCURRENCES:
+            continue
 
+        wins = int(group["success"].sum())
+        losses = count - wins
 
-# ============================================================
-# VALIDATE THE EIGHT EXISTING RULES
-# ============================================================
-
-def validate_rules(meta, start, end):
-    test = meta.iloc[start:end].copy()
-
-    results = []
-
-    for pattern, expected in RULES.items():
-        pattern_name = " -> ".join(pattern)
-
-        matching = test[
-            (test["candle_2_color"] == pattern[0])
-            & (test["candle_3_color"] == pattern[1])
-            & (test["candle_4_color"] == pattern[2])
-        ]
-
-        count = len(matching)
-
-        correct = int(
-            (
-                matching["actual_candle_5"] == expected
-            ).sum()
-        )
-
-        accuracy = (
-            correct / count * 100
-            if count else np.nan
-        )
-
-        results.append({
-            "pattern": pattern_name,
-            "rule_prediction": expected,
+        condition_rows.append({
+            "feature": feature,
+            "condition": str(bucket),
             "occurrences": count,
-            "correct_predictions": correct,
-            "incorrect_predictions": count - correct,
-            "accuracy_pct": (
-                round(accuracy, 2)
-                if not np.isnan(accuracy)
-                else np.nan
-            ),
+            "successes_red": wins,
+            "failures_green": losses,
+            "success_rate_pct": round(100 * wins / count, 2),
+            "failure_rate_pct": round(100 * losses / count, 2),
         })
 
-    report = pd.DataFrame(results)
+condition_report = pd.DataFrame(condition_rows)
 
-    total = len(test)
-    covered = test["rule_prediction"].notna()
-    covered_count = int(covered.sum())
+print("\n" + "=" * 75)
+print("INDIVIDUAL CONDITIONS: ALL RESULTS")
+print("=" * 75)
 
-    correct_all = int(
-        (
-            test.loc[covered, "rule_prediction"]
-            == test.loc[covered, "actual_candle_5"]
-        ).sum()
+if not condition_report.empty:
+
+    condition_report = condition_report.sort_values(
+        ["success_rate_pct", "occurrences"],
+        ascending=[False, False],
     )
 
-    overall_accuracy = (
-        correct_all / covered_count * 100
-        if covered_count else 0.0
+    # Print every condition in the console
+    print(condition_report.to_string(index=False))
+
+    condition_report.to_csv(
+        os.path.join(OUT_DIR, "individual_conditions.csv"),
+        index=False,
     )
 
-    print("\n========== RULE VALIDATION ==========")
-    print(report.to_string(index=False))
-
-    print(f"\nTest sequences: {total:,}")
-    print(f"Rule-covered sequences: {covered_count:,}")
-
-    print(
-        "Rule coverage: "
-        f"{covered_count / total * 100:.2f}%"
-        if total else "Rule coverage: 0.00%"
+    failure_report = condition_report.sort_values(
+        ["failure_rate_pct", "occurrences"],
+        ascending=[False, False],
     )
 
-    print(
-        "Rule accuracy on covered sequences: "
-        f"{overall_accuracy:.2f}%"
+    failure_report.to_csv(
+        os.path.join(OUT_DIR, "conditions_ranked_by_failure.csv"),
+        index=False,
     )
 
-    return report
+else:
+    print("No condition groups met the minimum occurrence threshold.")
 
 
 # ============================================================
-# TRAIN AND EVALUATE RANDOM FOREST
+# 7. CHRONOLOGICAL TRAIN/TEST SPLIT
 # ============================================================
 
-def train_model(X, y, meta):
-    n = len(X)
-    split = int(n * TRAIN_RATIO)
+data = data.sort_values("datetime").reset_index(drop=True)
 
-    if split < 50 or (n - split) < 20:
-        raise ValueError(
-            "Not enough sequences for chronological "
-            "train/test evaluation."
-        )
+split_index = int(len(data) * (1 - TEST_RATIO))
 
-    X_train = X.iloc[:split]
-    X_test = X.iloc[split:]
+train = data.iloc[:split_index].copy()
+test = data.iloc[split_index:].copy()
 
-    y_train = y.iloc[:split]
-    y_test = y.iloc[split:]
+print("\n" + "=" * 75)
+print("DECISION TREE TEST")
+print("=" * 75)
 
-    model = RandomForestClassifier(
-        n_estimators=400,
-        max_depth=12,
-        min_samples_leaf=10,
-        class_weight="balanced",
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
+print("Training patterns:", f"{len(train):,}")
+print("Testing patterns:", f"{len(test):,}")
+
+if len(train) < 100 or len(test) < 50:
+    raise ValueError("Insufficient training or testing rows.")
+
+X_train = train[feature_names]
+y_train = train["success"]
+
+X_test = test[feature_names]
+y_test = test["success"]
+
+tree = DecisionTreeClassifier(
+    max_depth=3,
+    min_samples_leaf=max(100, int(len(train) * 0.02)),
+    random_state=42,
+)
+
+tree.fit(X_train, y_train)
+
+predictions = tree.predict(X_test)
+probabilities = tree.predict_proba(X_test)[:, 1]
+
+accuracy = accuracy_score(y_test, predictions)
+test_baseline = 100 * y_test.mean()
+test_accuracy = 100 * accuracy
+
+print(f"\nTest-period Red rate: {test_baseline:.2f}%")
+print(f"Decision-tree accuracy: {test_accuracy:.2f}%")
+print(f"Difference vs baseline: {test_accuracy - test_baseline:+.2f} percentage points")
+
+print("\nClassification report:")
+print(
+    classification_report(
+        y_test,
+        predictions,
+        labels=[0, 1],
+        target_names=["Failure: Green", "Success: Red"],
+        zero_division=0,
     )
+)
 
-    print("\n========== TRAINING ML MODEL ==========")
-    print(f"Input candles per prediction: {WINDOW_SIZE}")
-    print(f"Training sequences: {len(X_train):,}")
-    print(f"Testing sequences:  {len(X_test):,}")
-
-    model.fit(X_train, y_train)
-
-    predictions = model.predict(X_test)
-    probabilities = model.predict_proba(X_test)
-
-    accuracy = accuracy_score(y_test, predictions)
-
-    print("\n========== ML TEST RESULTS ==========")
-    print(f"Test accuracy: {accuracy * 100:.2f}%")
-
-    print("\nClassification report:")
-
-    print(
-        classification_report(
-            y_test,
-            predictions,
-            labels=[0, 1],
-            target_names=["Red", "Green"],
-            zero_division=0,
-        )
-    )
-
-    print("Confusion matrix (actual rows, predicted columns):")
-
-    print(
-        confusion_matrix(
-            y_test,
-            predictions,
-            labels=[0, 1],
-        )
-    )
-
-    # Save historical out-of-sample test predictions.
-    test_meta = meta.iloc[split:].copy().reset_index(drop=True)
-
-    test_meta["ml_prediction"] = np.where(
-        predictions == 1,
-        "Green",
-        "Red",
-    )
-
-    classes = list(model.classes_)
-
-    red_index = classes.index(0)
-    green_index = classes.index(1)
-
-    test_meta["ml_probability_red"] = probabilities[:, red_index]
-    test_meta["ml_probability_green"] = probabilities[:, green_index]
-
-    test_meta["ml_correct"] = (
-        test_meta["actual_candle_5"]
-        == test_meta["ml_prediction"]
-    )
-
-    test_meta["rule_correct"] = (
-        test_meta["actual_candle_5"]
-        == test_meta["rule_prediction"]
-    )
-
-    # Leave rule correctness blank where no rule exists.
-    test_meta.loc[
-        test_meta["rule_prediction"].isna(),
-        "rule_correct",
-    ] = np.nan
-
-    test_meta.to_csv(PREDICTIONS_PATH, index=False)
-
-    # Feature importance.
-    importance = pd.DataFrame({
-        "feature": X.columns,
-        "importance": model.feature_importances_,
-    }).sort_values(
-        "importance",
-        ascending=False,
-    )
-
-    print("\nTop 15 ML features:")
-    print(importance.head(15).to_string(index=False))
-
-    # Compare rules and ML on the same test period.
-    covered = test_meta["rule_prediction"].notna()
-
-    if covered.any():
-        rule_acc = (
-            test_meta.loc[covered, "rule_correct"].mean() * 100
-        )
-
-        print(
-            "\nRule accuracy on covered test sequences: "
-            f"{rule_acc:.2f}%"
-        )
-
-    print(f"ML accuracy on test sequences: {accuracy * 100:.2f}%")
-
-    # Save the model and its feature schema.
-    joblib.dump(
-        {
-            "model": model,
-            "feature_columns": list(X.columns),
-            "rules": RULES,
-            "window_size": WINDOW_SIZE,
-        },
-        MODEL_PATH,
-    )
-
-    print(f"\nModel saved to: {MODEL_PATH}")
-    print(f"Test predictions saved to: {PREDICTIONS_PATH}")
-
-    return model, test_meta
+print("Confusion matrix (actual rows, predicted columns):")
+print(confusion_matrix(y_test, predictions, labels=[0, 1]))
 
 
 # ============================================================
-# PREDICT THE FIFTH CANDLE AFTER THE LATEST FOUR CANDLES
+# 8. PRINT DECISION-TREE CONDITIONS
 # ============================================================
 
-def predict_next_candle(df, X, model):
-    if len(df) < WINDOW_SIZE:
-        raise ValueError(
-            f"At least {WINDOW_SIZE} candles are required."
-        )
+rules = export_text(
+    tree,
+    feature_names=feature_names,
+    decimals=4,
+)
 
-    latest_four = df.iloc[-WINDOW_SIZE:]
+print("\n" + "=" * 75)
+print("DECISION-TREE CONDITION COMBINATIONS")
+print("=" * 75)
+print(rules)
 
-    # Build features from the latest four KNOWN candles.
-    latest_row = make_feature_row(latest_four)
-
-    latest_features = pd.DataFrame(
-        [latest_row],
-        columns=X.columns,
-    ).replace(
-        [np.inf, -np.inf], np.nan
-    ).fillna(0)
-
-    latest_colors = tuple(latest_four["color"].tolist())
-
-    # Rules use Candle 2, Candle 3 and Candle 4.
-    rule_colors = latest_colors[-3:]
-    rule_prediction = RULES.get(rule_colors)
-
-    ml_prediction = int(model.predict(latest_features)[0])
-    probabilities = model.predict_proba(latest_features)[0]
-
-    classes = list(model.classes_)
-
-    red_probability = probabilities[classes.index(0)]
-    green_probability = probabilities[classes.index(1)]
-
-    ml_label = "Green" if ml_prediction == 1 else "Red"
-
-    print("\n========== NEXT CANDLE PREDICTION ==========")
-
-    if "datetime" in df.columns:
-        print("Latest known candle time:", latest_four.iloc[-1]["datetime"])
-
-    print("\nInput candle colors:")
-
-    for position, color in enumerate(latest_colors, start=1):
-        print(f"Candle {position}: {color}")
-
-    print("\nRule pattern (Candles 2, 3, 4):", rule_colors)
-    print("Rule-based Candle 5 prediction:", rule_prediction or "No rule")
-
-    print("\nML prediction for Candle 5:", ml_label)
-    print(f"ML probability Red:   {red_probability * 100:.2f}%")
-    print(f"ML probability Green: {green_probability * 100:.2f}%")
-
-    print(
-        "\nIMPORTANT: The probabilities are model estimates, "
-        "not guarantees or necessarily calibrated probabilities."
-    )
-
-    print(
-        "This prediction is for the candle immediately after "
-        "the latest candle in your CSV."
-    )
+with open(
+    os.path.join(OUT_DIR, "decision_tree_rules.txt"),
+    "w",
+    encoding="utf-8",
+) as f:
+    f.write(rules)
 
 
 # ============================================================
-# MAIN
+# 9. SAVE TEST PREDICTIONS
 # ============================================================
 
-def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+test_results = test[
+    ["datetime", "success"] + feature_names
+].copy()
 
-    df = load_data(CSV_PATH)
-    df = prepare_candles(df)
+test_results["actual_candle4_color"] = np.where(
+    test_results["success"] == 1, "Red", "Green"
+)
 
-    X, y, meta = build_sequences(df)
+test_results["predicted_candle4_color"] = np.where(
+    predictions == 1, "Red", "Green"
+)
 
-    if len(X) < 100:
-        raise ValueError(
-            "Insufficient sequences after creating four-candle "
-            "input windows."
-        )
+test_results["predicted_red_probability_pct"] = (
+    probabilities * 100
+).round(2)
 
-    split = int(len(X) * TRAIN_RATIO)
+test_results["correct_prediction"] = (
+    test_results["success"].to_numpy() == predictions
+)
 
-    if split < 50 or len(X) - split < 20:
-        raise ValueError(
-            "Insufficient sequences for model evaluation."
-        )
-
-    # Validate rules on the chronological holdout period.
-    report = validate_rules(meta, split, len(meta))
-
-    report.to_csv(RULE_REPORT_PATH, index=False)
-
-    print(f"\nRule report saved to: {RULE_REPORT_PATH}")
-
-    model, test_meta = train_model(X, y, meta)
-
-    # Predict the candle after the latest four known candles.
-    predict_next_candle(df, X, model)
+test_results.to_csv(
+    os.path.join(OUT_DIR, "test_predictions.csv"),
+    index=False,
+)
 
 
-if __name__ == "__main__":
-    main()
+# ============================================================
+# 10. SAVE OVERALL SUMMARY
+# ============================================================
+
+summary = pd.DataFrame([{
+    "pattern": "Red-Red-Green",
+    "target": "Candle 4 Red",
+    "total_usable_patterns": total,
+    "successes": successes,
+    "failures": failures,
+    "overall_success_rate_pct": round(success_rate, 2),
+    "overall_failure_rate_pct": round(failure_rate, 2),
+    "training_patterns": len(train),
+    "testing_patterns": len(test),
+    "test_baseline_success_rate_pct": round(test_baseline, 2),
+    "decision_tree_test_accuracy_pct": round(test_accuracy, 2),
+    "accuracy_minus_baseline_pp": round(
+        test_accuracy - test_baseline, 2
+    ),
+}])
+
+summary.to_csv(
+    os.path.join(OUT_DIR, "overall_summary.csv"),
+    index=False,
+)
+
+
+# ============================================================
+# 11. FINISHED
+# ============================================================
+
+print("\n" + "=" * 75)
+print("ANALYSIS COMPLETED")
+print("=" * 75)
+
+print("Output folder:", os.path.abspath(OUT_DIR))
+print("\nFiles saved:")
+
+for filename in [
+    "individual_conditions.csv",
+    "conditions_ranked_by_failure.csv",
+    "decision_tree_rules.txt",
+    "test_predictions.csv",
+    "overall_summary.csv",
+]:
+    print(" -", filename)
+
+print("\nSuccess = Candle 4 Red.")
+print("Failure = Candle 4 Green.")
+print("Compare decision-tree accuracy against the test-period baseline.")
+print("Historical patterns do not guarantee future performance.")
