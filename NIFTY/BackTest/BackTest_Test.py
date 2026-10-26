@@ -1,3 +1,4 @@
+
 import os
 import time as time_module
 import calendar
@@ -30,19 +31,10 @@ INTERVAL = "FIVE_MINUTE"
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Fixed start date: 1 January 2015
-START_DATE = datetime(
-    2015, 1, 1, 0, 0,
-    tzinfo=IST
-)
+START_DATE = datetime(2015, 1, 1, 0, 0, tzinfo=IST)
 
 MAX_RETRIES = 4
 RETRY_BASE_SECONDS = 2
-
-OUTPUT_CSV = "nifty_candle_daily_2015_to_current.csv"
-MONTHLY_CSV = "nifty_candle_monthly_2015_to_current.csv"
-RULES_CSV = "nifty_candle_rules_2015_to_current.csv"
-FETCH_STATUS_CSV = "nifty_fetch_status_2015_to_current.csv"
 
 FIRST_THREE_TIMES = ["09:15", "09:20", "09:25"]
 FOURTH_CANDLE_TIME = "09:30"
@@ -54,7 +46,74 @@ CANDLE_COLUMNS = [
 
 
 # ============================================================
-# CANDLE COLOR AND METRICS
+# PREDICTION RULES
+# ============================================================
+
+#NOTE : The following rules have been removed from FOURTH\FIFTH candle prediction. The removed patterns are: 
+    #("Green", "Green", "Green"): "Red", form both 4th and 5th candle prediction
+    #("Red", "Red", "Red"): "Red", form 5th candle prediction
+    #("Green", "Red", "Red"): "Green", form 5th candle prediction
+    #Overall ACCURACY : 55.91%
+    #Overall Directional points : +9,081.86
+
+
+# Rules used to predict the FOURTH candle.
+#
+# Removed from fourth-candle prediction:
+# ("Green", "Green", "Green"): "Red"
+
+RULES_4TH = {
+    ("Red", "Red", "Green"): "Red",
+    ("Green", "Green", "Red"): "Red",
+    ("Red", "Green", "Red"): "Red",
+    ("Green", "Red", "Green"): "Green",
+    ("Red", "Red", "Red"): "Red",
+    ("Red", "Green", "Green"): "Red",
+    ("Green", "Red", "Red"): "Green",
+}
+
+# Rules used to predict the FIFTH candle.
+# These are evaluated only after the fourth prediction is correct.
+#
+# Removed from fifth-candle prediction:
+# ("Green", "Green", "Green"): "Red"
+# ("Red", "Red", "Red"): "Red"
+# ("Green", "Red", "Red"): "Green"
+
+RULES_5TH = {
+    ("Red", "Red", "Green"): "Red",
+    ("Green", "Green", "Red"): "Red",
+    ("Red", "Green", "Red"): "Red",
+    ("Green", "Red", "Green"): "Green",
+    ("Red", "Green", "Green"): "Red",
+}
+
+
+def predict_fourth_candle(first, second, third):
+    return RULES_4TH.get(
+        (first, second, third),
+        "No Prediction"
+    )
+
+
+def predict_fifth_candle(first, second, third):
+    return RULES_5TH.get(
+        (first, second, third),
+        "No Prediction"
+    )
+
+
+def describe_rule(first, second, third, predicted):
+    pattern = f"{first} -> {second} -> {third}"
+
+    if predicted == "No Prediction":
+        return f"{pattern} = No Rule"
+
+    return f"{pattern} = {predicted}"
+
+
+# ============================================================
+# CANDLE METRICS
 # ============================================================
 
 def candle_color(row):
@@ -86,77 +145,35 @@ def add_candle_metrics(df):
 
 
 # ============================================================
-# ORIGINAL THREE-CANDLE PREDICTION RULES
-# ============================================================
-
-RULES = {
-    ("Red", "Red", "Green"): "Red",
-    ("Green", "Green", "Red"): "Red",
-    ("Red", "Green", "Red"): "Red",
-    ("Green", "Red", "Green"): "Green",
-    ("Red", "Red", "Red"): "Red",
-    ("Green", "Green", "Green"): "Red",
-    ("Red", "Green", "Green"): "Red",
-    ("Green", "Red", "Red"): "Green",
-}
-
-
-def predict_fourth_candle(first, second, third):
-    return RULES.get(
-        (first, second, third),
-        "No Prediction"
-    )
-
-
-def describe_rule(first, second, third, predicted):
-    pattern = f"{first} -> {second} -> {third}"
-
-    if predicted == "No Prediction":
-        return f"{pattern} = No Rule"
-
-    return f"{pattern} = {predicted}"
-
-
-# ============================================================
 # SMARTAPI LOGIN
 # ============================================================
 
 def login_to_smartapi():
-
     missing = []
 
     if not API_KEY:
         missing.append("SMARTAPI_API_KEY")
-
     if not CLIENT_CODE:
         missing.append("SMARTAPI_CLIENT_CODE")
-
     if not PASSWORD:
         missing.append("SMARTAPI_PASSWORD")
-
     if not TOTP_SECRET:
         missing.append("SMARTAPI_TOTP_SECRET")
 
     if missing:
         raise ValueError(
-            "Missing SmartAPI environment variables: "
-            + ", ".join(missing)
+            "Missing environment variables: " + ", ".join(missing)
         )
 
     smart_api = SmartConnect(api_key=API_KEY)
-
     totp = pyotp.TOTP(TOTP_SECRET).now()
 
     session_data = smart_api.generateSession(
-        CLIENT_CODE,
-        PASSWORD,
-        totp
+        CLIENT_CODE, PASSWORD, totp
     )
 
     if not session_data or not session_data.get("status"):
-        raise RuntimeError(
-            f"SmartAPI login failed: {session_data}"
-        )
+        raise RuntimeError(f"SmartAPI login failed: {session_data}")
 
     return smart_api
 
@@ -179,7 +196,6 @@ def convert_to_ist(value):
 # ============================================================
 
 def fetch_historical_data(smart_api, from_date, to_date):
-
     params = {
         "exchange": EXCHANGE,
         "symboltoken": SYMBOL_TOKEN,
@@ -191,7 +207,6 @@ def fetch_historical_data(smart_api, from_date, to_date):
     last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
-
         try:
             response = smart_api.getCandleData(params)
 
@@ -203,14 +218,9 @@ def fetch_historical_data(smart_api, from_date, to_date):
                 data = response["data"]
 
                 if not data:
-                    return pd.DataFrame(
-                        columns=CANDLE_COLUMNS
-                    )
+                    return pd.DataFrame(columns=CANDLE_COLUMNS)
 
-                return pd.DataFrame(
-                    data,
-                    columns=CANDLE_COLUMNS
-                )
+                return pd.DataFrame(data, columns=CANDLE_COLUMNS)
 
             last_error = RuntimeError(
                 f"Historical API response: {response}"
@@ -220,18 +230,12 @@ def fetch_historical_data(smart_api, from_date, to_date):
             last_error = exc
 
         if attempt < MAX_RETRIES:
-
-            delay = RETRY_BASE_SECONDS * (
-                2 ** (attempt - 1)
-            )
+            delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1))
 
             print(
-                f"  Attempt {attempt}/{MAX_RETRIES} failed: "
-                f"{last_error}"
+                f"  Attempt {attempt}/{MAX_RETRIES} failed: {last_error}"
             )
-
             print(f"  Retrying in {delay} seconds...")
-
             time_module.sleep(delay)
 
     raise RuntimeError(
@@ -240,31 +244,21 @@ def fetch_historical_data(smart_api, from_date, to_date):
 
 
 # ============================================================
-# FETCH HISTORICAL DATA MONTH BY MONTH
-# FROM JANUARY 2015 THROUGH THE CURRENT DATE
+# FETCH DATA MONTH BY MONTH
+# No files are written.
 # ============================================================
 
 def fetch_historical_range(smart_api, start_date):
-
     all_data = []
     fetch_status = []
 
     now_ist = datetime.now(IST)
     today = now_ist.date()
 
-    start_year = start_date.year
-    start_month = start_date.month
-
-    end_year = today.year
-    end_month = today.month
-
     periods = []
+    year, month = start_date.year, start_date.month
 
-    year = start_year
-    month = start_month
-
-    while (year, month) <= (end_year, end_month):
-
+    while (year, month) <= (today.year, today.month):
         periods.append((year, month))
 
         if month == 12:
@@ -273,40 +267,25 @@ def fetch_historical_range(smart_api, start_date):
         else:
             month += 1
 
-    print("\n" + "=" * 85)
-    print(
-        f"FETCHING DATA FROM {start_date.date()} "
-        f"THROUGH {today}"
-    )
-    print(f"Current IST date/time: {now_ist}")
-    print("=" * 85)
+    print("\n" + "=" * 90)
+    print(f"FETCHING NIFTY 50 DATA: {start_date.date()} TO {today}")
+    print(f"Current IST time: {now_ist}")
+    print("=" * 90)
 
     for year, month in periods:
-
         month_name = calendar.month_name[month]
-
         last_day = calendar.monthrange(year, month)[1]
 
-        start_dt = datetime(
-            year, month, 1, 9, 0,
-            tzinfo=IST
-        )
+        start_dt = datetime(year, month, 1, 9, 0, tzinfo=IST)
+        end_dt = datetime(year, month, last_day, 15, 30, tzinfo=IST)
 
-        end_dt = datetime(
-            year, month, last_day, 15, 30,
-            tzinfo=IST
-        )
-
-        if year == start_year and month == start_month:
+        if (year, month) == (start_date.year, start_date.month):
             start_dt = max(start_dt, start_date)
 
-        if year == now_ist.year and month == now_ist.month:
+        if (year, month) == (now_ist.year, now_ist.month):
             end_dt = min(end_dt, now_ist)
 
         print(f"\nFetching {month_name} {year}...")
-        print(f"  From: {start_dt}")
-        print(f"  To  : {end_dt}")
-
         status_base = {
             "year": year,
             "month": month,
@@ -314,31 +293,23 @@ def fetch_historical_range(smart_api, start_date):
         }
 
         try:
-
             month_df = fetch_historical_data(
-                smart_api,
-                start_dt,
-                end_dt
+                smart_api, start_dt, end_dt
             )
 
             if month_df.empty:
-
-                print("  WARNING: API returned zero candles.")
-
+                print("  WARNING: No candles returned.")
                 fetch_status.append({
                     **status_base,
                     "fetch_status": "NO DATA",
                     "candles_received": 0,
                     "error": "",
                 })
-
                 continue
 
             month_df["timestamp"] = pd.to_datetime(
-                month_df["timestamp"],
-                errors="coerce"
+                month_df["timestamp"], errors="coerce"
             )
-
             month_df = month_df.dropna(
                 subset=["timestamp"]
             ).copy()
@@ -355,93 +326,51 @@ def fetch_historical_range(smart_api, start_date):
             ].copy()
 
             if month_df.empty:
-
-                print(
-                    "  No candles remained after date filtering."
-                )
-
+                print("  No candles remained after date filtering.")
                 fetch_status.append({
                     **status_base,
                     "fetch_status": "NO DATA",
                     "candles_received": 0,
                     "error": "",
                 })
-
                 continue
 
-            count = len(month_df)
-
-            print(f"  Candles received: {count}")
-
+            print(f"  Candles received: {len(month_df)}")
             all_data.append(month_df)
 
             fetch_status.append({
                 **status_base,
                 "fetch_status": "SUCCESS",
-                "candles_received": count,
+                "candles_received": len(month_df),
                 "error": "",
             })
 
         except Exception as exc:
-
-            error_text = str(exc)
-
-            print(f"  ERROR: {error_text}")
+            print(f"  ERROR: {exc}")
 
             fetch_status.append({
                 **status_base,
                 "fetch_status": "FAILED",
                 "candles_received": 0,
-                "error": error_text,
+                "error": str(exc),
             })
-
-    # --------------------------------------------------------
-    # SAVE FETCH STATUS
-    # --------------------------------------------------------
 
     status_df = pd.DataFrame(fetch_status)
 
-    if not status_df.empty:
-
-        status_df = status_df.sort_values(
-            ["year", "month"]
-        ).reset_index(drop=True)
-
-    status_df.to_csv(
-        FETCH_STATUS_CSV,
-        index=False
-    )
-
-    print("\n" + "=" * 85)
-    print("HISTORICAL DATA FETCH STATUS")
-    print("=" * 85)
+    print("\n" + "=" * 90)
+    print("FETCH STATUS")
+    print("=" * 90)
 
     if not status_df.empty:
         print(status_df.to_string(index=False))
 
-    print(
-        f"\nFetch status saved to: "
-        f"{os.path.abspath(FETCH_STATUS_CSV)}"
-    )
-
     if not all_data:
-        return (
-            pd.DataFrame(columns=CANDLE_COLUMNS),
-            status_df
-        )
+        return pd.DataFrame(columns=CANDLE_COLUMNS), status_df
 
-    # --------------------------------------------------------
-    # COMBINE ALL MONTHS
-    # --------------------------------------------------------
-
-    combined_df = pd.concat(
-        all_data,
-        ignore_index=True
-    )
+    combined_df = pd.concat(all_data, ignore_index=True)
 
     combined_df = combined_df.drop_duplicates(
-        subset=["timestamp"],
-        keep="first"
+        subset=["timestamp"], keep="first"
     )
 
     combined_df = combined_df.sort_values(
@@ -457,45 +386,27 @@ def fetch_historical_range(smart_api, start_date):
         & (combined_df["timestamp"] <= now_ist)
     ].copy()
 
-    print("\nCombined historical data:")
-    print(f"Total candles: {len(combined_df)}")
+    print(f"\nTotal candles retrieved: {len(combined_df)}")
 
     if not combined_df.empty:
-        print(
-            f"First candle: {combined_df['timestamp'].min()}"
-        )
-        print(
-            f"Last candle : {combined_df['timestamp'].max()}"
-        )
+        print(f"First candle: {combined_df['timestamp'].min()}")
+        print(f"Last candle : {combined_df['timestamp'].max()}")
 
     return combined_df, status_df
 
 
 # ============================================================
 # ANALYZE ONE TRADING DAY
-#
-# 1. Predict candle 4 from candles 1, 2 and 3.
-# 2. Continue to candle 5 only if candle 4 is correct.
-# 3. Stop if candle 4 is incorrect or a doji.
-# 4. No sixth-candle analysis.
 # ============================================================
 
 def analyze_day(trading_date, day_df):
-
-    day_df = day_df.sort_values(
-        "timestamp"
-    ).copy()
+    day_df = day_df.sort_values("timestamp").copy()
 
     first_three = (
         day_df[
-            day_df["candle_time"].isin(
-                FIRST_THREE_TIMES
-            )
+            day_df["candle_time"].isin(FIRST_THREE_TIMES)
         ]
-        .drop_duplicates(
-            subset=["candle_time"],
-            keep="first"
-        )
+        .drop_duplicates(subset=["candle_time"], keep="first")
         .set_index("candle_time")
         .reindex(FIRST_THREE_TIMES)
     )
@@ -503,10 +414,7 @@ def analyze_day(trading_date, day_df):
     colors = []
 
     for candle_time in FIRST_THREE_TIMES:
-
-        color = first_three.loc[
-            candle_time, "color"
-        ]
+        color = first_three.loc[candle_time, "color"]
 
         if pd.isna(color):
             color = "Missing"
@@ -514,61 +422,42 @@ def analyze_day(trading_date, day_df):
         colors.append(color)
 
     color1, color2, color3 = colors
+    pattern = (color1, color2, color3)
 
-    result_row = {
+    result = {
         "date": trading_date,
         "year": trading_date.year,
         "month": trading_date.month,
-
         "candle_1_color": color1,
         "candle_2_color": color2,
         "candle_3_color": color3,
-
-        "rule_applied": (
-            "Incomplete: missing first three candles"
-        ),
-
+        "pattern": " -> ".join(colors),
+        "rule_applied": "Incomplete: missing first three candles",
         "predicted_4th_color": "No Prediction",
         "actual_4th_color": "Missing",
         "result": "Incomplete",
-
         "4th_open": None,
         "4th_high": None,
         "4th_low": None,
         "4th_close": None,
-
         "predicted_5th_color": "Not Attempted",
         "actual_5th_color": "Missing",
-
+        "5th_result": "Not Attempted",
         "5th_open": None,
         "5th_high": None,
         "5th_low": None,
         "5th_close": None,
-
-        "5th_result": "Not Attempted",
         "5th_points": 0.0,
-
-        "points": None,
+        "points": 0.0,
     }
 
-    # Require all first three candles.
     if "Missing" in colors:
-        return result_row
+        return result
 
-    # Predict the fourth candle.
-    predicted = predict_fourth_candle(
-        color1,
-        color2,
-        color3
-    )
-
-    result_row["predicted_4th_color"] = predicted
-
-    result_row["rule_applied"] = describe_rule(
-        color1,
-        color2,
-        color3,
-        predicted
+    predicted4 = predict_fourth_candle(*pattern)
+    result["predicted_4th_color"] = predicted4
+    result["rule_applied"] = describe_rule(
+        *pattern, predicted4
     )
 
     fourth_rows = day_df[
@@ -576,291 +465,316 @@ def analyze_day(trading_date, day_df):
     ]
 
     if fourth_rows.empty:
-
-        result_row["result"] = "Missing Fourth Candle"
-
-        return result_row
+        result["result"] = "Missing Fourth Candle"
+        return result
 
     fourth = fourth_rows.iloc[0]
+    actual4 = fourth["color"]
 
-    actual_fourth = fourth["color"]
-
-    result_row.update({
-        "actual_4th_color": actual_fourth,
+    result.update({
+        "actual_4th_color": actual4,
         "4th_open": float(fourth["open"]),
         "4th_high": float(fourth["high"]),
         "4th_low": float(fourth["low"]),
         "4th_close": float(fourth["close"]),
     })
 
-    if predicted == "No Prediction":
+    if predicted4 == "No Prediction":
+        result["result"] = "No Prediction"
+        return result
 
-        result_row["result"] = "No Prediction"
+    if actual4 == "Doji":
+        result["result"] = "Doji"
+        return result
 
-        return result_row
+    move4 = float(fourth["close"] - fourth["open"])
+    points4 = move4 if predicted4 == "Green" else -move4
+    result["points"] = points4
 
-    # A fourth-candle doji is not counted as correct.
-    if actual_fourth == "Doji":
-
-        result_row["result"] = "Doji"
-        result_row["points"] = 0.0
-
-        return result_row
-
-    # Calculate fourth-candle directional points.
-    fourth_move = float(
-        fourth["close"] - fourth["open"]
+    result["result"] = (
+        "Correct" if predicted4 == actual4 else "Incorrect"
     )
 
-    fourth_points = (
-        fourth_move
-        if predicted == "Green"
-        else -fourth_move
-    )
+    # Fifth-candle analysis only follows a correct fourth prediction.
+    if result["result"] != "Correct":
+        result["5th_result"] = "Stopped: fourth prediction incorrect"
+        return result
 
-    result_row["points"] = fourth_points
+    predicted5 = predict_fifth_candle(*pattern)
+    result["predicted_5th_color"] = predicted5
 
-    result_row["result"] = (
-        "Correct"
-        if predicted == actual_fourth
-        else "Incorrect"
-    )
-
-    # Stop if the fourth prediction is incorrect.
-    if result_row["result"] != "Correct":
-
-        result_row["5th_result"] = (
-            "Stopped: fourth prediction incorrect"
-        )
-
-        return result_row
-
-    # --------------------------------------------------------
-    # FIFTH CANDLE
-    # Continue only if the fourth prediction was correct.
-    # --------------------------------------------------------
-
-    result_row["predicted_5th_color"] = predicted
+    # Removed fifth-candle rules must not produce a prediction.
+    if predicted5 == "No Prediction":
+        result["5th_result"] = "No Prediction: rule excluded"
+        return result
 
     fifth_rows = day_df[
         day_df["candle_time"] == FIFTH_CANDLE_TIME
     ]
 
     if fifth_rows.empty:
-
-        result_row["5th_result"] = (
-            "Missing Fifth Candle"
-        )
-
-        return result_row
+        result["5th_result"] = "Missing Fifth Candle"
+        return result
 
     fifth = fifth_rows.iloc[0]
+    actual5 = fifth["color"]
 
-    actual_fifth = fifth["color"]
-
-    result_row.update({
-        "actual_5th_color": actual_fifth,
+    result.update({
+        "actual_5th_color": actual5,
         "5th_open": float(fifth["open"]),
         "5th_high": float(fifth["high"]),
         "5th_low": float(fifth["low"]),
         "5th_close": float(fifth["close"]),
     })
 
-    # Stop on a fifth-candle doji.
-    if actual_fifth == "Doji":
+    if actual5 == "Doji":
+        result["5th_result"] = "Doji"
+        return result
 
-        result_row["5th_result"] = "Doji"
-        result_row["5th_points"] = 0.0
+    move5 = float(fifth["close"] - fifth["open"])
+    points5 = move5 if predicted5 == "Green" else -move5
 
-        return result_row
+    result["5th_points"] = points5
+    result["points"] += points5
 
-    fifth_move = float(
-        fifth["close"] - fifth["open"]
+    result["5th_result"] = (
+        "Correct" if predicted5 == actual5 else "Incorrect"
     )
 
-    fifth_points = (
-        fifth_move
-        if predicted == "Green"
-        else -fifth_move
+    return result
+
+
+# ============================================================
+# ACCURACY REPORT FOR EACH RULE
+# ============================================================
+
+def print_rule_accuracy(results_df, rule_dict, candle_number):
+    print("\n" + "=" * 115)
+    print(f"CANDLE {candle_number} RULE-BY-RULE ACCURACY")
+    print("=" * 115)
+
+    result_column = (
+        "result" if candle_number == 4 else "5th_result"
     )
-
-    result_row["5th_points"] = fifth_points
-
-    result_row["points"] = (
-        fourth_points + fifth_points
+    prediction_column = (
+        "predicted_4th_color"
+        if candle_number == 4
+        else "predicted_5th_color"
     )
+    points_column = "points" if candle_number == 4 else "5th_points"
 
-    result_row["5th_result"] = (
-        "Correct"
-        if actual_fifth == predicted
-        else "Incorrect"
+    rows = []
+
+    for pattern, prediction in rule_dict.items():
+        pattern_text = " -> ".join(pattern)
+
+        eligible = results_df[
+            (results_df["pattern"] == pattern_text)
+            & (results_df[prediction_column] == prediction)
+            & (results_df[result_column].isin(["Correct", "Incorrect"]))
+        ]
+
+        correct = int((eligible[result_column] == "Correct").sum())
+        incorrect = int((eligible[result_column] == "Incorrect").sum())
+        total = correct + incorrect
+        accuracy = correct / total * 100 if total else 0.0
+        points = float(eligible[points_column].fillna(0).sum())
+
+        rows.append({
+            "Pattern": pattern_text,
+            "Prediction": prediction,
+            "Correct": correct,
+            "Incorrect": incorrect,
+            "Scored": total,
+            "Accuracy %": round(accuracy, 2),
+            "Directional Points": round(points, 2),
+        })
+
+    report = pd.DataFrame(rows)
+
+    if report.empty:
+        print("No rule results available.")
+    else:
+        print(report.to_string(index=False))
+
+    scored = results_df[
+        results_df[result_column].isin(["Correct", "Incorrect"])
+    ]
+
+    correct_total = int((scored[result_column] == "Correct").sum())
+    incorrect_total = int((scored[result_column] == "Incorrect").sum())
+    total = correct_total + incorrect_total
+    accuracy = correct_total / total * 100 if total else 0.0
+
+    print("-" * 115)
+    print(
+        f"CANDLE {candle_number} OVERALL: "
+        f"Correct={correct_total}, Incorrect={incorrect_total}, "
+        f"Scored={total}, Accuracy={accuracy:.2f}%"
     )
-
-    return result_row
 
 
 # ============================================================
 # MONTHLY SUMMARY
-# GROUPED BY YEAR AND MONTH
 # ============================================================
 
-def build_monthly_summary(
-    results_df,
-    fetch_status_df
-):
+def print_monthly_summary(results_df, fetch_status_df):
+    print("\n" + "=" * 145)
+    print("MONTHLY SUMMARY")
+    print("=" * 145)
 
-    monthly_rows = []
+    status_lookup = {}
 
-    if fetch_status_df.empty:
+    if not fetch_status_df.empty:
+        for _, row in fetch_status_df.iterrows():
+            status_lookup[(int(row["year"]), int(row["month"]))] = row
 
-        periods = sorted({
-            (int(row["year"]), int(row["month"]))
-            for _, row in results_df.iterrows()
-        })
+    periods = sorted(set(
+        zip(results_df["year"].astype(int), results_df["month"].astype(int))
+    ))
 
-    else:
-
-        periods = list(
-            fetch_status_df[
-                ["year", "month"]
-            ]
-            .drop_duplicates()
-            .sort_values(["year", "month"])
-            .itertuples(
-                index=False,
-                name=None
-            )
-        )
+    rows = []
 
     for year, month in periods:
-
-        year = int(year)
-        month = int(month)
-
         month_df = results_df[
             (results_df["year"] == year)
             & (results_df["month"] == month)
         ]
 
-        # Accuracy is based on fourth-candle predictions.
-        scored = month_df[
-            month_df["result"].isin(
-                ["Correct", "Incorrect"]
-            )
+        scored4 = month_df[
+            month_df["result"].isin(["Correct", "Incorrect"])
         ]
 
-        correct_count = int(
-            (scored["result"] == "Correct").sum()
-        )
+        correct4 = int((scored4["result"] == "Correct").sum())
+        incorrect4 = int((scored4["result"] == "Incorrect").sum())
+        total4 = correct4 + incorrect4
+        accuracy4 = correct4 / total4 * 100 if total4 else 0.0
 
-        incorrect_count = int(
-            (scored["result"] == "Incorrect").sum()
-        )
-
-        scored_total = (
-            correct_count + incorrect_count
-        )
-
-        accuracy = (
-            correct_count / scored_total * 100
-            if scored_total
-            else 0.0
-        )
-
-        total_points = float(
-            scored["points"].fillna(0).sum()
-        )
-
-        status_row = fetch_status_df[
-            (fetch_status_df["year"] == year)
-            & (fetch_status_df["month"] == month)
+        scored5 = month_df[
+            month_df["5th_result"].isin(["Correct", "Incorrect"])
         ]
 
-        if not status_row.empty:
+        correct5 = int((scored5["5th_result"] == "Correct").sum())
+        incorrect5 = int((scored5["5th_result"] == "Incorrect").sum())
+        total5 = correct5 + incorrect5
+        accuracy5 = correct5 / total5 * 100 if total5 else 0.0
 
-            status = status_row.iloc[0][
-                "fetch_status"
-            ]
+        status_row = status_lookup.get((year, month))
+        fetch_status = (
+            status_row["fetch_status"] if status_row is not None
+            else "UNKNOWN"
+        )
+        candles = (
+            int(status_row["candles_received"])
+            if status_row is not None else 0
+        )
 
-            candles_received = int(
-                status_row.iloc[0][
-                    "candles_received"
-                ]
-            )
-
-        else:
-
-            status = "UNKNOWN"
-            candles_received = 0
-
-        monthly_rows.append({
-
-            "year": year,
-            "month": month,
-            "month_name": calendar.month_name[month],
-
-            "fetch_status": status,
-            "candles_received": candles_received,
-
-            "trading_days_analyzed": len(month_df),
-
-            "correct": correct_count,
-            "incorrect": incorrect_count,
-            "scored_predictions": scored_total,
-
-            "accuracy_percent": round(
-                accuracy, 2
+        rows.append({
+            "Year": year,
+            "Month": calendar.month_name[month],
+            "Fetch Status": fetch_status,
+            "Candles": candles,
+            "Days Analyzed": len(month_df),
+            "4th Correct": correct4,
+            "4th Incorrect": incorrect4,
+            "4th Accuracy %": round(accuracy4, 2),
+            "4th Points": round(
+                scored4["points"].fillna(0).sum(), 2
             ),
-
-            "total_points": round(
-                total_points, 2
-            ),
-
-            "doji": int(
-                (month_df["result"] == "Doji").sum()
-            ),
-
-            "incomplete": int(
-                (
-                    month_df["result"] == "Incomplete"
-                ).sum()
-            ),
-
-            "missing_fourth_candle": int(
-                (
-                    month_df["result"]
-                    == "Missing Fourth Candle"
-                ).sum()
-            ),
-
-            "no_prediction": int(
-                (
-                    month_df["result"]
-                    == "No Prediction"
-                ).sum()
-            ),
-
-            "fifth_candle_extended": int(
-                (
-                    month_df["predicted_5th_color"]
-                    != "Not Attempted"
-                ).sum()
-            ),
-
-            "fifth_correct": int(
-                (
-                    month_df["5th_result"] == "Correct"
-                ).sum()
-            ),
-
-            "fifth_incorrect": int(
-                (
-                    month_df["5th_result"] == "Incorrect"
-                ).sum()
+            "5th Correct": correct5,
+            "5th Incorrect": incorrect5,
+            "5th Accuracy %": round(accuracy5, 2),
+            "5th Points": round(
+                scored5["5th_points"].fillna(0).sum(), 2
             ),
         })
 
-    return pd.DataFrame(monthly_rows)
+    if rows:
+        print(pd.DataFrame(rows).to_string(index=False))
+    else:
+        print("No monthly results available.")
+
+
+# ============================================================
+# OVERALL SUMMARY
+# ============================================================
+
+def print_overall_summary(results_df):
+    print("\n" + "=" * 90)
+    print("OVERALL SUMMARY")
+    print("=" * 90)
+
+    scored4 = results_df[
+        results_df["result"].isin(["Correct", "Incorrect"])
+    ]
+
+    correct4 = int((scored4["result"] == "Correct").sum())
+    incorrect4 = int((scored4["result"] == "Incorrect").sum())
+    total4 = correct4 + incorrect4
+    accuracy4 = correct4 / total4 * 100 if total4 else 0.0
+    points4 = float(scored4["points"].fillna(0).sum())
+
+    scored5 = results_df[
+        results_df["5th_result"].isin(["Correct", "Incorrect"])
+    ]
+
+    correct5 = int((scored5["5th_result"] == "Correct").sum())
+    incorrect5 = int((scored5["5th_result"] == "Incorrect").sum())
+    total5 = correct5 + incorrect5
+    accuracy5 = correct5 / total5 * 100 if total5 else 0.0
+    points5 = float(scored5["5th_points"].fillna(0).sum())
+
+    print(f"Trading dates analyzed            : {len(results_df)}")
+    print()
+    print("FOURTH-CANDLE PREDICTIONS")
+    print(f"Correct predictions               : {correct4}")
+    print(f"Incorrect predictions             : {incorrect4}")
+    print(f"Scored predictions                : {total4}")
+    print(f"Accuracy                           : {accuracy4:.2f}%")
+    print(f"Directional points (4th candle)    : {points4:.2f}")
+    print()
+    print("FIFTH-CANDLE PREDICTIONS")
+    print(f"Correct predictions               : {correct5}")
+    print(f"Incorrect predictions             : {incorrect5}")
+    print(f"Scored predictions                : {total5}")
+    print(f"Accuracy                           : {accuracy5:.2f}%")
+    print(f"Directional points (5th candle)    : {points5:.2f}")
+    print()
+    print("OTHER DAILY RESULTS")
+    print(
+        f"Doji fourth candles                : "
+        f"{int((results_df['result'] == 'Doji').sum())}"
+    )
+    print(
+        f"Missing first-three-candle days    : "
+        f"{int((results_df['result'] == 'Incomplete').sum())}"
+    )
+    print(
+        f"Missing fourth candles             : "
+        f"{int((results_df['result'] == 'Missing Fourth Candle').sum())}"
+    )
+    print(
+        f"No fourth-candle prediction        : "
+        f"{int((results_df['result'] == 'No Prediction').sum())}"
+    )
+    print(
+        f"Fifth-candle correct               : {correct5}"
+    )
+    print(
+        f"Fifth-candle incorrect             : {incorrect5}"
+    )
+    print(
+        f"Fifth-candle doji                  : "
+        f"{int((results_df['5th_result'] == 'Doji').sum())}"
+    )
+    print(
+        f"Fifth-candle missing               : "
+        f"{int((results_df['5th_result'] == 'Missing Fifth Candle').sum())}"
+    )
+    print(
+        f"Fifth-candle excluded-rule days    : "
+        f"{int((results_df['5th_result'] == 'No Prediction: rule excluded').sum())}"
+    )
 
 
 # ============================================================
@@ -868,48 +782,34 @@ def build_monthly_summary(
 # ============================================================
 
 def main():
-
     smart_api = None
 
     try:
-
         now_ist = datetime.now(IST)
 
         print(
-            f"\nAnalyzing NIFTY 50 from "
-            f"{START_DATE.date()} through "
-            f"{now_ist.date()}."
+            f"\nAnalyzing NIFTY 50 from {START_DATE.date()} "
+            f"through {now_ist.date()}."
         )
 
         smart_api = login_to_smartapi()
-
         print("SmartAPI login successful.")
 
-        # Fetch every month from January 2015 onward.
         raw_df, fetch_status_df = fetch_historical_range(
-            smart_api,
-            START_DATE
+            smart_api, START_DATE
         )
 
         if raw_df.empty:
-
             print(
-                "\nNo historical candles retrieved. "
-                "Check credentials, API permissions, "
-                "and historical data availability."
+                "\nNo historical candles retrieved. Check credentials, "
+                "API permissions, and historical data availability."
             )
-
             return
 
-        raw_df["timestamp"] = (
-            raw_df["timestamp"].apply(convert_to_ist)
-        )
+        raw_df["timestamp"] = raw_df["timestamp"].apply(convert_to_ist)
 
         df = add_candle_metrics(raw_df)
-
-        df = df.sort_values(
-            "timestamp"
-        ).copy()
+        df = df.sort_values("timestamp").copy()
 
         now_ist = datetime.now(IST)
 
@@ -918,332 +818,59 @@ def main():
             & (df["timestamp"] <= now_ist)
         ].copy()
 
-        df["candle_time"] = (
-            df["timestamp"].dt.strftime("%H:%M")
-        )
-
-        df["trading_date"] = (
-            df["timestamp"].dt.date
-        )
-
-        # ----------------------------------------------------
-        # ANALYZE EVERY TRADING DAY
-        # ----------------------------------------------------
+        df["candle_time"] = df["timestamp"].dt.strftime("%H:%M")
+        df["trading_date"] = df["timestamp"].dt.date
 
         daily_results = []
 
-        for trading_date, day_df in df.groupby(
-            "trading_date"
-        ):
+        for trading_date, day_df in df.groupby("trading_date"):
+            daily_results.append(analyze_day(trading_date, day_df))
 
-            daily_results.append(
-                analyze_day(
-                    trading_date,
-                    day_df
-                )
-            )
-
-        results_df = pd.DataFrame(
-            daily_results
-        )
+        results_df = pd.DataFrame(daily_results)
 
         if results_df.empty:
-
             print("No daily analysis results available.")
-
             return
 
-        results_df["date"] = pd.to_datetime(
-            results_df["date"]
-        )
+        results_df["date"] = pd.to_datetime(results_df["date"])
+        results_df = results_df.sort_values("date").reset_index(drop=True)
 
-        results_df = results_df.sort_values(
-            "date"
-        ).reset_index(drop=True)
+        # No CSV files are generated anywhere in this script.
 
-        # ----------------------------------------------------
-        # SAVE DAILY RESULTS
-        # ----------------------------------------------------
+        print_monthly_summary(results_df, fetch_status_df)
 
-        results_df.to_csv(
-            OUTPUT_CSV,
-            index=False
-        )
+        print_rule_accuracy(results_df, RULES_4TH, 4)
+        print_rule_accuracy(results_df, RULES_5TH, 5)
 
-        # ----------------------------------------------------
-        # SAVE FOURTH AND FIFTH CANDLE RULES REPORT
-        # ----------------------------------------------------
+        print_overall_summary(results_df)
 
-        rule_columns = [
-            "date",
-            "year",
-            "month",
-
-            "candle_1_color",
-            "candle_2_color",
-            "candle_3_color",
-
-            "rule_applied",
-
-            "predicted_4th_color",
-            "actual_4th_color",
-            "result",
-
-            "4th_open",
-            "4th_high",
-            "4th_low",
-            "4th_close",
-
-            "predicted_5th_color",
-            "actual_5th_color",
-            "5th_result",
-
-            "5th_open",
-            "5th_high",
-            "5th_low",
-            "5th_close",
-
-            "5th_points",
-            "points",
-        ]
-
-        results_df[rule_columns].to_csv(
-            RULES_CSV,
-            index=False
-        )
-
-        # ----------------------------------------------------
-        # MONTHLY SUMMARY
-        # ----------------------------------------------------
-
-        monthly_df = build_monthly_summary(
-            results_df,
-            fetch_status_df
-        )
-
-        monthly_df.to_csv(
-            MONTHLY_CSV,
-            index=False
-        )
-
-        print("\n" + "=" * 130)
-
-        print(
-            f"MONTHLY ACCURACY AND POINTS - "
-            f"{START_DATE.year} TO {now_ist.year}"
-        )
-
-        print("=" * 130)
-
-        monthly_columns = [
-            "year",
-            "month_name",
-            "candles_received",
-            "trading_days_analyzed",
-            "correct",
-            "incorrect",
-            "accuracy_percent",
-            "total_points",
-            "fifth_candle_extended",
-            "fifth_correct",
-            "fifth_incorrect",
-        ]
-
-        print(
-            monthly_df[
-                monthly_columns
-            ].to_string(index=False)
-        )
-
-        # ----------------------------------------------------
-        # OVERALL SUMMARY FOR THE COMPLETE PERIOD
-        # ----------------------------------------------------
-
-        scored = results_df[
-            results_df["result"].isin(
-                ["Correct", "Incorrect"]
-            )
-        ]
-
-        correct_count = int(
-            (scored["result"] == "Correct").sum()
-        )
-
-        incorrect_count = int(
-            (scored["result"] == "Incorrect").sum()
-        )
-
-        scored_total = (
-            correct_count + incorrect_count
-        )
-
-        overall_accuracy = (
-            correct_count / scored_total * 100
-            if scored_total
-            else 0.0
-        )
-
-        overall_points = float(
-            scored["points"].fillna(0).sum()
-        )
-
-        fifth_extended_count = int(
-            (
-                results_df["predicted_5th_color"]
-                != "Not Attempted"
-            ).sum()
-        )
-
-        fifth_correct_count = int(
-            (
-                results_df["5th_result"] == "Correct"
-            ).sum()
-        )
-
-        fifth_incorrect_count = int(
-            (
-                results_df["5th_result"] == "Incorrect"
-            ).sum()
-        )
-
-        print("\n" + "=" * 80)
-
-        print(
-            f"OVERALL SUMMARY - "
-            f"{START_DATE.date()} TO {now_ist.date()}"
-        )
-
-        print("=" * 80)
-
-        print(
-            f"Correct predictions       : {correct_count}"
-        )
-
-        print(
-            f"Incorrect predictions     : {incorrect_count}"
-        )
-
-        print(
-            f"Scored predictions        : {scored_total}"
-        )
-
-        print(
-            f"Overall accuracy          : "
-            f"{overall_accuracy:.2f}%"
-        )
-
-        print(
-            f"Total directional points  : "
-            f"{overall_points:.2f}"
-        )
-
-        print(
-            f"Trading dates analyzed    : "
-            f"{len(results_df)}"
-        )
-
-        print("-" * 80)
-
-        print(
-            f"Fifth-candle extensions   : "
-            f"{fifth_extended_count}"
-        )
-
-        print(
-            f"Fifth candle correct      : "
-            f"{fifth_correct_count}"
-        )
-
-        print(
-            f"Fifth candle incorrect    : "
-            f"{fifth_incorrect_count}"
-        )
-
-        # ----------------------------------------------------
-        # WARN ABOUT MISSING DATA
-        # ----------------------------------------------------
-
-        failed_months = monthly_df[
-            monthly_df["fetch_status"].isin(
-                ["FAILED", "NO DATA"]
-            )
+        failed_months = fetch_status_df[
+            fetch_status_df["fetch_status"].isin(["FAILED", "NO DATA"])
         ]
 
         if not failed_months.empty:
-
+            print("\n" + "=" * 90)
+            print("WARNING: MONTHS WITH MISSING OR FAILED DATA")
+            print("=" * 90)
+            print(failed_months.to_string(index=False))
             print(
-                "\nWARNING: Some months have missing "
-                "historical data:"
+                "\nResults may be incomplete for these months. "
+                "A month marked NO DATA does not necessarily mean "
+                "the market had no trading sessions."
             )
 
-            print(
-                failed_months[
-                    [
-                        "year",
-                        "month_name",
-                        "fetch_status",
-                        "candles_received",
-                    ]
-                ].to_string(index=False)
-            )
-
-            print(
-                "Overall results may be incomplete. "
-                "Check the fetch-status CSV and resolve "
-                "missing historical data where possible."
-            )
-
-        # ----------------------------------------------------
-        # OUTPUT FILES
-        # ----------------------------------------------------
-
-        print("\n" + "=" * 80)
-        print("OUTPUT FILES")
-        print("=" * 80)
-
-        print(
-            f"Daily results : "
-            f"{os.path.abspath(OUTPUT_CSV)}"
-        )
-
-        print(
-            f"Monthly report: "
-            f"{os.path.abspath(MONTHLY_CSV)}"
-        )
-
-        print(
-            f"Rules report  : "
-            f"{os.path.abspath(RULES_CSV)}"
-        )
-
-        print(
-            f"Fetch status  : "
-            f"{os.path.abspath(FETCH_STATUS_CSV)}"
-        )
+        print("\nAnalysis complete. No CSV files were generated.")
 
     except Exception as exc:
-
         print(f"\nERROR: {exc}")
 
     finally:
-
         if smart_api is not None:
-
             try:
-
-                smart_api.terminateSession(
-                    CLIENT_CODE
-                )
-
-                print(
-                    "\nSmartAPI session terminated."
-                )
-
+                smart_api.terminateSession(CLIENT_CODE)
+                print("SmartAPI session terminated.")
             except Exception as exc:
-
-                print(
-                    f"Could not terminate session: {exc}"
-                )
+                print(f"Could not terminate session: {exc}")
 
 
 if __name__ == "__main__":

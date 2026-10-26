@@ -56,6 +56,12 @@ CANDLE_COLUMNS = [
     #Overall ACCURACY : 55.91%
     #Overall Directional points : +9,081.86
 
+
+# Rules used to predict the FOURTH candle.
+#
+# Removed from fourth-candle prediction:
+# ("Green", "Green", "Green"): "Red"
+
 RULES_4TH = {
     ("Red", "Red", "Green"): "Red",
     ("Green", "Green", "Red"): "Red",
