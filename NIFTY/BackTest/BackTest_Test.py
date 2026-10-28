@@ -31,7 +31,7 @@ INTERVAL = "FIVE_MINUTE"
 
 IST = ZoneInfo("Asia/Kolkata")
 
-START_DATE = datetime(2015, 1, 1, 0, 0, tzinfo=IST)
+START_DATE = datetime(2016, 1, 1, 0, 0, tzinfo=IST)
 
 MAX_RETRIES = 4
 RETRY_BASE_SECONDS = 2
@@ -44,7 +44,49 @@ CANDLE_COLUMNS = [
     "timestamp", "open", "high", "low", "close", "volume"
 ]
 
+# ============================================================
+# Best accuracy PREDICTING RULES
+# ============================================================
+'''
+## 1. Previous 3 Candles
 
+- Green–Red–Green → Green (59.49%)
+- Green–Red–Red → Green (56.92%)
+- Green–Green–Green → Green (50.19%)
+- Green–Green–Red → Red (54.98%)
+- Red–Green–Red → Red (55.77%)
+- Red–Red–Red → Red (56.13%)
+- Red–Green–Green → Red (56.99%)
+- Red–Red–Green → Red (57.27%)
+
+## 2. Previous 4 Candles
+
+- Red–Green–Red–Green → Green (57.32%)
+- Red–Red–Green–Green → Green (55.10%)
+- Red–Red–Red–Red → Green (54.10%)
+- Green–Green–Green–Red → Green (53.73%)
+- Green–Green–Red–Green → 50/50 (50.00%)
+- Red–Green–Red–Red → Red (51.01%)
+- Green–Red–Green–Green → Red (51.06%)
+- Red–Red–Green–Red → Red (51.78%)
+- Red–Red–Red–Green → Red (53.15%)
+- Red–Green–Green–Red → Red (53.30%)
+- Green–Green–Green–Green → Red (53.33%)
+- Green–Red–Red–Green → Red (54.05%)
+- Green–Red–Red–Red → Red (54.46%)
+- Green–Green–Red–Red → Red (54.97%)
+- Green–Red–Green–Red → Red (58.33%)
+- Red–Green–Green–Green → Red (58.75%)
+
+## 3. Gap Up
+
+- Candle 1 → Red (58.48%)
+
+## 4. Gap Down
+
+- Candle 1 → Red (52.45%)
+
+'''
 # ============================================================
 # PREDICTION RULES
 # ============================================================

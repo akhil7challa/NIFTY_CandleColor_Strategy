@@ -1,22 +1,13 @@
-
 import os
+import itertools
 import numpy as np
 import pandas as pd
-
-from sklearn.tree import DecisionTreeClassifier, export_text
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
 CSV_PATH = r".\Historic_5Min_CandlesData_2016_2026.csv"
-OUT_DIR = "nifty_rule_conditions"
-
-MIN_CONDITION_OCCURRENCES = 50
-TEST_RATIO = 0.30
-
-os.makedirs(OUT_DIR, exist_ok=True)
 
 
 # ============================================================
@@ -31,9 +22,10 @@ if not os.path.exists(CSV_PATH):
 
 df = pd.read_csv(CSV_PATH)
 
-print("=" * 75)
-print("NIFTY RED-RED-GREEN CONDITION ANALYSIS")
-print("=" * 75)
+print("=" * 90)
+print("NIFTY: FIRST FIVE 5-MINUTE CANDLE COLOR ANALYSIS")
+print("=" * 90)
+
 print("\nOriginal columns:", df.columns.tolist())
 
 
@@ -53,450 +45,531 @@ def find_column(*candidates, required=True):
             f"Could not find column from {candidates}.\n"
             f"Available columns: {df.columns.tolist()}"
         )
+
     return None
 
 
-date_col = find_column("timestamp", "datetime", "date_time", "date")
+date_col = find_column(
+    "timestamp", "datetime", "date_time", "date"
+)
 open_col = find_column("open")
 high_col = find_column("high")
 low_col = find_column("low")
 close_col = find_column("close")
-volume_col = find_column(
-    "volume", "vol", "qty", "quantity", required=False
+
+df = df.rename(
+    columns={
+        date_col: "datetime",
+        open_col: "open",
+        high_col: "high",
+        low_col: "low",
+        close_col: "close",
+    }
 )
-
-rename_map = {
-    date_col: "datetime",
-    open_col: "open",
-    high_col: "high",
-    low_col: "low",
-    close_col: "close",
-}
-
-if volume_col is not None:
-    rename_map[volume_col] = "volume"
-
-df = df.rename(columns=rename_map)
-
-if "volume" not in df.columns:
-    df["volume"] = np.nan
 
 df["datetime"] = pd.to_datetime(
     df["datetime"], errors="coerce"
 )
 
-for col in ["open", "high", "low", "close", "volume"]:
+for col in ["open", "high", "low", "close"]:
     df[col] = pd.to_numeric(df[col], errors="coerce")
 
+original_rows = len(df)
+
 df = (
-    df.dropna(subset=["datetime", "open", "high", "low", "close"])
+    df.dropna(
+        subset=["datetime", "open", "high", "low", "close"]
+    )
     .sort_values("datetime")
     .drop_duplicates(subset=["datetime"])
     .reset_index(drop=True)
 )
 
-if len(df) < 100:
-    raise ValueError("Not enough valid OHLC candles in the CSV.")
+print(f"\nOriginal rows: {original_rows:,}")
+print(f"Valid unique candles: {len(df):,}")
+print(
+    f"Invalid/duplicate rows removed: "
+    f"{original_rows - len(df):,}"
+)
 
-print("\nValid candles:", f"{len(df):,}")
-print("First candle:", df["datetime"].iloc[0])
-print("Last candle:", df["datetime"].iloc[-1])
+if df.empty:
+    raise ValueError("No valid historical candles found.")
 
 
 # ============================================================
-# 2. CALCULATE CANDLE FEATURES
+# 2. IDENTIFY THE FIRST FIVE CANDLES
 # ============================================================
 
-body = df["close"] - df["open"]
-candle_range = df["high"] - df["low"]
-safe_open = df["open"].replace(0, np.nan)
+# Assumes timestamps are in Indian exchange local time.
+#
+# Candle 1: 09:15-09:20
+# Candle 2: 09:20-09:25
+# Candle 3: 09:25-09:30
+# Candle 4: 09:30-09:35
+# Candle 5: 09:35-09:40
 
-# Green when close >= open; Red when close < open
-df["color"] = np.where(body >= 0, "Green", "Red")
+df["trading_date"] = df["datetime"].dt.date
+df["time"] = df["datetime"].dt.strftime("%H:%M")
 
-df["body_pct"] = 100 * body.abs() / safe_open
-df["range_pct"] = 100 * candle_range / safe_open
-
-df["upper_wick_pct"] = (
-    100
-    * (df["high"] - df[["open", "close"]].max(axis=1))
-    / safe_open
-)
-
-df["lower_wick_pct"] = (
-    100
-    * (df[["open", "close"]].min(axis=1) - df["low"])
-    / safe_open
-)
-
-# Volume ratio based only on previous candles
-volume_average = (
-    df["volume"]
-    .shift(1)
-    .rolling(window=20, min_periods=5)
-    .mean()
-)
-
-df["volume_ratio"] = (
-    df["volume"] / volume_average.replace(0, np.nan)
-)
-
-valid_volume_ratios = int(df["volume_ratio"].notna().sum())
-
-print("\nValid volume values:", int(df["volume"].notna().sum()))
-print("Valid volume-ratio values:", valid_volume_ratios)
-
-# Use body and wick features regardless of volume availability
-features_to_use = [
-    "body_pct",
-    "range_pct",
-    "upper_wick_pct",
-    "lower_wick_pct",
+opening_times = [
+    "09:15",
+    "09:20",
+    "09:25",
+    "09:30",
+    "09:35",
 ]
 
-# Add volume only if there are enough valid ratios
-if valid_volume_ratios >= 100:
-    features_to_use.append("volume_ratio")
-    print("Volume analysis: ENABLED")
-else:
-    print("Volume analysis: DISABLED (insufficient valid ratios)")
+time_to_number = {
+    time: number
+    for number, time in enumerate(opening_times, start=1)
+}
 
+opening = df[df["time"].isin(opening_times)].copy()
 
-# ============================================================
-# 3. BUILD CANDLE 1, CANDLE 2, CANDLE 3 FEATURES
-# ============================================================
-
-feature_names = []
-
-# Each row represents Candle 4:
-# Candle 1 = 3 rows earlier
-# Candle 2 = 2 rows earlier
-# Candle 3 = 1 row earlier
-# Current row = Candle 4 outcome
-
-for candle_num, shift in [(1, 3), (2, 2), (3, 1)]:
-
-    df[f"c{candle_num}_color"] = df["color"].shift(shift)
-
-    for feature in features_to_use:
-        feature_name = f"c{candle_num}_{feature}"
-        df[feature_name] = df[feature].shift(shift)
-        feature_names.append(feature_name)
-
-
-# ============================================================
-# 4. FILTER RED -> RED -> GREEN
-# ============================================================
-
-pattern_mask = (
-    (df["c1_color"] == "Red")
-    & (df["c2_color"] == "Red")
-    & (df["c3_color"] == "Green")
+opening["candle_number"] = opening["time"].map(
+    time_to_number
 )
 
-data = df.loc[pattern_mask].copy()
-
-# Success: Candle 4 closes Red
-# Failure: Candle 4 closes Green
-data["success"] = (data["color"] == "Red").astype(int)
-
-print("\n" + "=" * 75)
-print("PATTERN DIAGNOSTICS")
-print("=" * 75)
-
-print("Matching Red-Red-Green patterns:", f"{len(data):,}")
-
-if len(data) == 0:
-    print("\nLast 15 candle colors:")
-    print(df[["datetime", "color"]].tail(15).to_string(index=False))
-    raise ValueError(
-        "No matching patterns found. Check the data and candle colors."
-    )
-
-# Replace infinite values, then drop rows missing only selected features
-data = data.replace([np.inf, -np.inf], np.nan)
-
-print("\nMissing values by feature:")
-print(data[feature_names].isna().sum().to_string())
-
-usable = data.dropna(
-    subset=feature_names + ["success"]
-).copy()
-
-print("\nUsable patterns:", f"{len(usable):,}")
-print("Excluded patterns:", f"{len(data) - len(usable):,}")
-
-if len(usable) < 100:
-    raise ValueError(
-        "Fewer than 100 usable patterns remain. "
-        "Review the missing-value report."
-    )
-
-data = usable.sort_values("datetime").reset_index(drop=True)
-
-
-# ============================================================
-# 5. OVERALL SUCCESS AND FAILURE RATES
-# ============================================================
-
-total = len(data)
-successes = int(data["success"].sum())
-failures = total - successes
-
-success_rate = 100 * successes / total
-failure_rate = 100 * failures / total
-
-print("\n" + "=" * 75)
-print("OVERALL RESULTS")
-print("=" * 75)
-
-print(f"Pattern: Red -> Red -> Green")
-print(f"Total usable occurrences: {total:,}")
-print(f"Success (Candle 4 Red): {successes:,} ({success_rate:.2f}%)")
-print(f"Failure (Candle 4 Green): {failures:,} ({failure_rate:.2f}%)")
-
-
-# ============================================================
-# 6. INDIVIDUAL CONDITION ANALYSIS
-# ============================================================
-
-condition_rows = []
-
-for feature in feature_names:
-
-    try:
-        buckets = pd.qcut(
-            data[feature],
-            q=4,
-            labels=["Lowest", "Low-Mid", "High-Mid", "Highest"],
-            duplicates="drop",
-        )
-    except (ValueError, TypeError):
-        print(f"Skipping feature that cannot be grouped: {feature}")
-        continue
-
-    temp = pd.DataFrame({
-        "bucket": buckets,
-        "success": data["success"].values,
-    })
-
-    for bucket, group in temp.groupby("bucket", observed=True):
-
-        count = len(group)
-
-        if count < MIN_CONDITION_OCCURRENCES:
-            continue
-
-        wins = int(group["success"].sum())
-        losses = count - wins
-
-        condition_rows.append({
-            "feature": feature,
-            "condition": str(bucket),
-            "occurrences": count,
-            "successes_red": wins,
-            "failures_green": losses,
-            "success_rate_pct": round(100 * wins / count, 2),
-            "failure_rate_pct": round(100 * losses / count, 2),
-        })
-
-condition_report = pd.DataFrame(condition_rows)
-
-print("\n" + "=" * 75)
-print("INDIVIDUAL CONDITIONS: ALL RESULTS")
-print("=" * 75)
-
-if not condition_report.empty:
-
-    condition_report = condition_report.sort_values(
-        ["success_rate_pct", "occurrences"],
-        ascending=[False, False],
-    )
-
-    # Print every condition in the console
-    print(condition_report.to_string(index=False))
-
-    condition_report.to_csv(
-        os.path.join(OUT_DIR, "individual_conditions.csv"),
-        index=False,
-    )
-
-    failure_report = condition_report.sort_values(
-        ["failure_rate_pct", "occurrences"],
-        ascending=[False, False],
-    )
-
-    failure_report.to_csv(
-        os.path.join(OUT_DIR, "conditions_ranked_by_failure.csv"),
-        index=False,
-    )
-
-else:
-    print("No condition groups met the minimum occurrence threshold.")
-
-
-# ============================================================
-# 7. CHRONOLOGICAL TRAIN/TEST SPLIT
-# ============================================================
-
-data = data.sort_values("datetime").reset_index(drop=True)
-
-split_index = int(len(data) * (1 - TEST_RATIO))
-
-train = data.iloc[:split_index].copy()
-test = data.iloc[split_index:].copy()
-
-print("\n" + "=" * 75)
-print("DECISION TREE TEST")
-print("=" * 75)
-
-print("Training patterns:", f"{len(train):,}")
-print("Testing patterns:", f"{len(test):,}")
-
-if len(train) < 100 or len(test) < 50:
-    raise ValueError("Insufficient training or testing rows.")
-
-X_train = train[feature_names]
-y_train = train["success"]
-
-X_test = test[feature_names]
-y_test = test["success"]
-
-tree = DecisionTreeClassifier(
-    max_depth=3,
-    min_samples_leaf=max(100, int(len(train) * 0.02)),
-    random_state=42,
+opening = opening.sort_values(
+    ["trading_date", "candle_number", "datetime"]
 )
 
-tree.fit(X_train, y_train)
-
-predictions = tree.predict(X_test)
-probabilities = tree.predict_proba(X_test)[:, 1]
-
-accuracy = accuracy_score(y_test, predictions)
-test_baseline = 100 * y_test.mean()
-test_accuracy = 100 * accuracy
-
-print(f"\nTest-period Red rate: {test_baseline:.2f}%")
-print(f"Decision-tree accuracy: {test_accuracy:.2f}%")
-print(f"Difference vs baseline: {test_accuracy - test_baseline:+.2f} percentage points")
-
-print("\nClassification report:")
-print(
-    classification_report(
-        y_test,
-        predictions,
-        labels=[0, 1],
-        target_names=["Failure: Green", "Success: Red"],
-        zero_division=0,
-    )
+# Keep one candle for each expected time per trading day.
+opening = opening.drop_duplicates(
+    subset=["trading_date", "candle_number"],
+    keep="first"
 )
 
-print("Confusion matrix (actual rows, predicted columns):")
-print(confusion_matrix(y_test, predictions, labels=[0, 1]))
-
-
-# ============================================================
-# 8. PRINT DECISION-TREE CONDITIONS
-# ============================================================
-
-rules = export_text(
-    tree,
-    feature_names=feature_names,
-    decimals=4,
+# Green = close >= open
+# Red = close < open
+opening["color"] = np.where(
+    opening["close"] >= opening["open"],
+    "Green",
+    "Red"
 )
 
-print("\n" + "=" * 75)
-print("DECISION-TREE CONDITION COMBINATIONS")
-print("=" * 75)
-print(rules)
+# Keep only dates with all five expected opening candles.
+counts = opening.groupby("trading_date")[
+    "candle_number"
+].nunique()
 
-with open(
-    os.path.join(OUT_DIR, "decision_tree_rules.txt"),
-    "w",
-    encoding="utf-8",
-) as f:
-    f.write(rules)
+all_dates = sorted(df["trading_date"].unique())
+complete_dates = counts[counts == 5].index
 
-
-# ============================================================
-# 9. SAVE TEST PREDICTIONS
-# ============================================================
-
-test_results = test[
-    ["datetime", "success"] + feature_names
+complete = opening[
+    opening["trading_date"].isin(complete_dates)
 ].copy()
 
-test_results["actual_candle4_color"] = np.where(
-    test_results["success"] == 1, "Red", "Green"
+if complete.empty:
+    raise ValueError(
+        "No trading days contain all five expected candles "
+        "(09:15, 09:20, 09:25, 09:30, 09:35). "
+        "Check the CSV timestamps."
+    )
+
+# Create one row per trading day with five candle colors.
+color_pivot = complete.pivot(
+    index="trading_date",
+    columns="candle_number",
+    values="color"
 )
 
-test_results["predicted_candle4_color"] = np.where(
-    predictions == 1, "Red", "Green"
+color_pivot = color_pivot.rename(
+    columns={
+        i: f"candle_{i}"
+        for i in range(1, 6)
+    }
+).reset_index()
+
+# Create one row per trading day with candle OHLC values.
+price_pivot = complete.pivot(
+    index="trading_date",
+    columns="candle_number",
+    values=["open", "high", "low", "close"]
 )
 
-test_results["predicted_red_probability_pct"] = (
-    probabilities * 100
-).round(2)
+price_pivot.columns = [
+    f"{field}_candle_{number}"
+    for field, number in price_pivot.columns
+]
 
-test_results["correct_prediction"] = (
-    test_results["success"].to_numpy() == predictions
+price_pivot = price_pivot.reset_index()
+
+daily = color_pivot.merge(
+    price_pivot,
+    on="trading_date",
+    how="left"
 )
 
-test_results.to_csv(
-    os.path.join(OUT_DIR, "test_predictions.csv"),
-    index=False,
+color_columns = [
+    f"candle_{i}" for i in range(1, 6)
+]
+
+print(f"\nTrading dates in source data: {len(all_dates):,}")
+print(f"Complete five-candle days: {len(daily):,}")
+print(
+    f"Dates excluded due to missing opening candles: "
+    f"{len(all_dates) - len(daily):,}"
 )
 
 
 # ============================================================
-# 10. SAVE OVERALL SUMMARY
+# 3. OVERALL RED/GREEN COUNTS FOR EACH CANDLE
 # ============================================================
 
-summary = pd.DataFrame([{
-    "pattern": "Red-Red-Green",
-    "target": "Candle 4 Red",
-    "total_usable_patterns": total,
-    "successes": successes,
-    "failures": failures,
-    "overall_success_rate_pct": round(success_rate, 2),
-    "overall_failure_rate_pct": round(failure_rate, 2),
-    "training_patterns": len(train),
-    "testing_patterns": len(test),
-    "test_baseline_success_rate_pct": round(test_baseline, 2),
-    "decision_tree_test_accuracy_pct": round(test_accuracy, 2),
-    "accuracy_minus_baseline_pp": round(
-        test_accuracy - test_baseline, 2
-    ),
-}])
+print("\n" + "=" * 90)
+print("1. OVERALL CANDLE COLOR SUMMARY")
+print("=" * 90)
 
-summary.to_csv(
-    os.path.join(OUT_DIR, "overall_summary.csv"),
-    index=False,
+total_days = len(daily)
+
+print(
+    f"\n{'Candle':<15}"
+    f"{'Green Count':>15}"
+    f"{'Green %':>13}"
+    f"{'Red Count':>15}"
+    f"{'Red %':>13}"
+    f"{'Total':>12}"
 )
 
+print("-" * 83)
+
+for i, col in enumerate(color_columns, start=1):
+    green = int((daily[col] == "Green").sum())
+    red = int((daily[col] == "Red").sum())
+
+    green_pct = green / total_days * 100
+    red_pct = red / total_days * 100
+
+    print(
+        f"{'Candle ' + str(i):<15}"
+        f"{green:>15,}"
+        f"{green_pct:>12.2f}%"
+        f"{red:>15,}"
+        f"{red_pct:>12.2f}%"
+        f"{total_days:>12,}"
+    )
+
 
 # ============================================================
-# 11. FINISHED
+# 4. ALL 32 FIVE-CANDLE COLOR COMBINATIONS
 # ============================================================
 
-print("\n" + "=" * 75)
+print("\n" + "=" * 90)
+print("2. ALL FIVE-CANDLE COLOR COMBINATIONS")
+print("=" * 90)
+
+# Each combination contains five colors.
+# Example: Green-Red-Green-Red-Green.
+
+combinations = list(
+    itertools.product(["Green", "Red"], repeat=5)
+)
+
+print(
+    f"\n{'Combination':<40}"
+    f"{'Count':>12}"
+    f"{'Percentage':>15}"
+)
+
+print("-" * 67)
+
+for combination in combinations:
+    mask = pd.Series(True, index=daily.index)
+
+    for i, color in enumerate(combination, start=1):
+        mask &= daily[f"candle_{i}"].eq(color)
+
+    count = int(mask.sum())
+    percentage = count / total_days * 100
+
+    label = "-".join(combination)
+
+    print(
+        f"{label:<40}"
+        f"{count:>12,}"
+        f"{percentage:>14.2f}%"
+    )
+
+
+# ============================================================
+# 5. CANDLE-TO-CANDLE TRANSITIONS
+# ============================================================
+
+print("\n" + "=" * 90)
+print("3. CANDLE-TO-CANDLE TRANSITION COUNTS")
+print("=" * 90)
+
+for i in range(1, 5):
+    first_col = f"candle_{i}"
+    next_col = f"candle_{i + 1}"
+
+    transition = pd.crosstab(
+        daily[first_col],
+        daily[next_col]
+    ).reindex(
+        index=["Red", "Green"],
+        columns=["Red", "Green"],
+        fill_value=0
+    )
+
+    print(f"\nCandle {i} -> Candle {i + 1}")
+    print(transition.to_string())
+
+
+# ============================================================
+# 6. CONDITIONAL PROBABILITIES
+# ============================================================
+
+print("\n" + "=" * 90)
+print("4. CONDITIONAL COLOR PROBABILITIES")
+print("=" * 90)
+
+# For each candle from 2 to 5, examine the color of the
+# previous candle and all possible preceding color sequences.
+#
+# Example:
+# If Candles 1, 2, and 3 are Green-Red-Green,
+# how often is Candle 4 Green versus Red?
+
+for target_number in range(2, 6):
+    previous_columns = [
+        f"candle_{i}"
+        for i in range(1, target_number)
+    ]
+
+    target_column = f"candle_{target_number}"
+
+    print(
+        f"\n{'-' * 75}\n"
+        f"P(CANDLE {target_number} COLOR | "
+        f"PREVIOUS CANDLE COLORS)\n"
+        f"{'-' * 75}"
+    )
+
+    for previous_colors in itertools.product(
+        ["Green", "Red"],
+        repeat=target_number - 1
+    ):
+        mask = pd.Series(True, index=daily.index)
+
+        for col, color in zip(
+            previous_columns, previous_colors
+        ):
+            mask &= daily[col].eq(color)
+
+        subset = daily.loc[mask, target_column]
+        observations = len(subset)
+
+        green = int((subset == "Green").sum())
+        red = int((subset == "Red").sum())
+
+        pattern = "-".join(previous_colors)
+
+        if observations == 0:
+            print(
+                f"Previous: {pattern:<30} "
+                f"Observations: 0 | No data"
+            )
+            continue
+
+        print(
+            f"Previous: {pattern:<30} "
+            f"N={observations:>6,} | "
+            f"Next Green: {green / observations * 100:>6.2f}% "
+            f"({green:,}) | "
+            f"Next Red: {red / observations * 100:>6.2f}% "
+            f"({red:,})"
+        )
+
+
+# ============================================================
+# 7. PREVIOUS TRADING DAY'S CLOSE
+# ============================================================
+
+print("\n" + "=" * 90)
+print("5. GAP-UP / GAP-DOWN / GAP-NEUTRAL ANALYSIS")
+print("=" * 90)
+
+# Find the final available candle close for each trading day.
+# This assumes the source contains the full intraday session.
+
+daily_closes = (
+    df.sort_values("datetime")
+    .groupby("trading_date", as_index=False)
+    .tail(1)[["trading_date", "close"]]
+    .sort_values("trading_date")
+    .reset_index(drop=True)
+)
+
+daily_closes["previous_day_close"] = (
+    daily_closes["close"].shift(1)
+)
+
+# Match the previous available trading session's close.
+daily = daily.merge(
+    daily_closes[
+        ["trading_date", "previous_day_close"]
+    ],
+    on="trading_date",
+    how="left"
+)
+
+daily["opening_price"] = daily["open_candle_1"]
+
+daily["gap_points"] = (
+    daily["opening_price"] - daily["previous_day_close"]
+)
+
+daily["gap_pct"] = (
+    daily["gap_points"]
+    / daily["previous_day_close"]
+    * 100
+)
+
+daily["gap_direction"] = np.select(
+    [
+        daily["gap_points"] > 0,
+        daily["gap_points"] < 0,
+    ],
+    [
+        "Gap Up",
+        "Gap Down",
+    ],
+    default="Gap Neutral"
+)
+
+# Exclude the first historical session from gap analysis.
+gap_daily = daily.dropna(
+    subset=["previous_day_close", "gap_points"]
+).copy()
+
+for direction in ["Gap Up", "Gap Down", "Gap Neutral"]:
+    subset = gap_daily[
+        gap_daily["gap_direction"] == direction
+    ]
+
+    n = len(subset)
+
+    print("\n" + "-" * 90)
+    print(f"{direction.upper()} — {n:,} DAYS")
+    print("-" * 90)
+
+    if n == 0:
+        print("No observations.")
+        continue
+
+    # Red/green counts for each of the five candles.
+    for i in range(1, 6):
+        col = f"candle_{i}"
+
+        green = int((subset[col] == "Green").sum())
+        red = int((subset[col] == "Red").sum())
+
+        print(
+            f"Candle {i}: "
+            f"Green {green:,} ({green / n * 100:.2f}%) | "
+            f"Red {red:,} ({red / n * 100:.2f}%)"
+        )
+
+    # All 32 combinations for each gap direction.
+    print("\nFive-candle combinations:")
+
+    for combination in combinations:
+        mask = pd.Series(True, index=subset.index)
+
+        for i, color in enumerate(combination, start=1):
+            mask &= subset[f"candle_{i}"].eq(color)
+
+        count = int(mask.sum())
+        percentage = count / n * 100
+
+        print(
+            f"  {'-'.join(combination):<40}"
+            f"{count:>8,} days "
+            f"({percentage:.2f}%)"
+        )
+
+
+# ============================================================
+# 8. OPENING GAP SIZE STATISTICS
+# ============================================================
+
+print("\n" + "=" * 90)
+print("6. OPENING GAP SIZE STATISTICS")
+print("=" * 90)
+
+if not gap_daily.empty:
+    gap_summary = (
+        gap_daily.groupby("gap_direction")
+        .agg(
+            total_days=("gap_points", "size"),
+            average_gap_points=("gap_points", "mean"),
+            median_gap_points=("gap_points", "median"),
+            average_gap_pct=("gap_pct", "mean"),
+            median_gap_pct=("gap_pct", "median"),
+        )
+        .reindex(["Gap Up", "Gap Down", "Gap Neutral"])
+        .round(4)
+    )
+
+    print(gap_summary.to_string())
+else:
+    print("No gap observations available.")
+
+
+# ============================================================
+# 9. PRICE BODY AND RANGE STATISTICS
+# ============================================================
+
+print("\n" + "=" * 90)
+print("7. FIRST FIVE CANDLES: PRICE STATISTICS")
+print("=" * 90)
+
+for i in range(1, 6):
+    open_name = f"open_candle_{i}"
+    high_name = f"high_candle_{i}"
+    low_name = f"low_candle_{i}"
+    close_name = f"close_candle_{i}"
+
+    body = daily[close_name] - daily[open_name]
+    candle_range = daily[high_name] - daily[low_name]
+
+    print(f"\nCandle {i}")
+
+    print(f"  Average body (points):  {body.mean():.4f}")
+    print(f"  Median body (points):   {body.median():.4f}")
+    print(f"  Average range (points): {candle_range.mean():.4f}")
+    print(f"  Median range (points):  {candle_range.median():.4f}")
+
+
+# ============================================================
+# 10. FINAL CONSOLE SUMMARY
+# ============================================================
+
+print("\n" + "=" * 90)
 print("ANALYSIS COMPLETED")
-print("=" * 75)
+print("=" * 90)
 
-print("Output folder:", os.path.abspath(OUT_DIR))
-print("\nFiles saved:")
+print(f"Valid unique 5-minute candles: {len(df):,}")
+print(f"Complete five-candle days: {len(daily):,}")
+print(f"Days included in gap analysis: {len(gap_daily):,}")
 
-for filename in [
-    "individual_conditions.csv",
-    "conditions_ranked_by_failure.csv",
-    "decision_tree_rules.txt",
-    "test_predictions.csv",
-    "overall_summary.csv",
-]:
-    print(" -", filename)
+print("\nOpening candle definitions:")
+print("  Candle 1: 09:15-09:20")
+print("  Candle 2: 09:20-09:25")
+print("  Candle 3: 09:25-09:30")
+print("  Candle 4: 09:30-09:35")
+print("  Candle 5: 09:35-09:40")
 
-print("\nSuccess = Candle 4 Red.")
-print("Failure = Candle 4 Green.")
-print("Compare decision-tree accuracy against the test-period baseline.")
-print("Historical patterns do not guarantee future performance.")
+print("\nColor definitions:")
+print("  Green: close >= open")
+print("  Red:   close < open")
+
+print("\nGap definitions:")
+print("  Gap Up:      opening price > previous trading day's close")
+print("  Gap Down:    opening price < previous trading day's close")
+print("  Gap Neutral: opening price = previous trading day's close")
+
+print("\nNo output files or folders are created.")
+print("Historical patterns do not guarantee future results.")
