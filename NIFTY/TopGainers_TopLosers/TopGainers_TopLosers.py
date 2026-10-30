@@ -611,8 +611,10 @@ def calculate_market_movers(df):
 
 def save_output(gainers, losers):
 
-    gainers_file = OUT / "Top_Gainers.csv"
-    losers_file = OUT / "Top_Losers.csv"
+    current_date = datetime.now().strftime("%Y-%m-%d")
+
+    gainers_file = OUT / f"Top_Gainers_{current_date}.csv"
+    losers_file = OUT / f"Top_Losers_{current_date}.csv"
 
     gainers.to_csv(
         gainers_file,
@@ -631,13 +633,8 @@ def save_output(gainers, losers):
     print(f"\nTop Gainers: {gainers_file.resolve()}")
     print(f"Top Losers:  {losers_file.resolve()}")
 
-    print(
-        f"\nTotal gainers: {len(gainers)}"
-    )
-
-    print(
-        f"Total losers: {len(losers)}"
-    )
+    print(f"\nTotal gainers: {len(gainers)}")
+    print(f"Total losers: {len(losers)}")
 
 
 # ============================================================
