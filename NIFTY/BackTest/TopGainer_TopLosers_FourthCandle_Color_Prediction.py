@@ -83,28 +83,28 @@ def add_candle_metrics(df):
 '''
 ("Green", "Red", "Green") => Predict GREEN when:
 
-    1. 3rd Green candle has a strong bullish body
-    2. 3rd Green closes above the 2nd Red candle's high
-    3. 3rd candle has a small upper wick
-    4. 2nd Red candle has a weak body
-    5. 1st Green candle has a strong body
+    1. 3rd Green candle has a strong bullish body                       => Mandatory
+    2. 3rd Green closes above the 2nd Red candle's high                 => Mandatory
+    3. 3rd candle has a small upper wick                                => Supporting
+    4. 2nd Red candle has a weak body                                   => Supporting
+    5. 1st Green candle has a strong body                               => Supporting
 
 
 ("Green", "Red", "Red") => Predict GREEN when:
 
-    1. 3rd candle closes above the 2nd candle's low
-    2. 3rd Red has a strong lower wick
-    3. 2nd Red has a strong lower wick
-    4. 3rd Red has a small bearish body
-    5. 3rd Red body is smaller than the 2nd Red body
+    1. 3rd candle closes above the 2nd candle's low                     => Mandatory
+    2. 3rd Red has a strong lower wick                                  => Mandatory
+    3. 2nd Red has a strong lower wick                                  => Supporting
+    4. 3rd Red has a small bearish body                                 => Supporting
+    5. 3rd Red body is smaller than the 2nd Red body                    => Supporting
 
 
 ("Green", "Green", "Green") => Predict GREEN when:
 
-    1. 3rd Green has a strong bullish body
-    2. 3rd Green closes above the 2nd Green high
-    3. 3rd Green has a small upper wick
-    4. 2nd Green has a strong bullish body
+    1. 3rd Green has a strong bullish body                              => Mandatory
+    2. 3rd Green closes above the 2nd Green high                        => Mandatory
+    3. 3rd Green has a small upper wick                                 => Supporting
+    4. 2nd Green has a strong bullish body                              => Supporting
 '''
 
 RULES = {
