@@ -81,7 +81,7 @@ def add_candle_metrics(df):
 # ============================================================
 
 '''
-("Green", "Red", "Green") => Predict GREEN when:
+("Green", "Red", "Green") => Predict GREEN when (All Mandatory rules + atleast 2 Supporting rules):
 
     1. 3rd Green candle has a strong bullish body                       => Mandatory
     2. 3rd Green closes above the 2nd Red candle's high                 => Mandatory
