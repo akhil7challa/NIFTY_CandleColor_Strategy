@@ -300,11 +300,7 @@ def analyze_day(trading_date, day_df):
         "exit_price": None,
         "exit_reason": "No Breakout",
         "points": 0.0,
-        "result": "No Trade",
-        "hit_25_pts": False,
-        "max_points_seen": 0.0,
-        "time_hit_25": None,
-        "time_to_25_pts_min": None
+        "result": "No Trade"
     }
 
     if day_df.empty:
@@ -381,45 +377,17 @@ def analyze_day(trading_date, day_df):
 
     exit_price = None
     exit_reason = "EOD Square-off"
-    max_favorable = 0.0
-    hit_25_pts = False
-    time_hit_25 = None
-    time_to_25_pts_min = None
 
     for _, row in holding_candles.iterrows():
-        c_high = row["high"]
-        c_low = row["low"]
         c_close = row["close"]
         h_time = row["time_obj"]
 
         if breakout_type == "BUY":
-            candle_max_favorable = c_high - entry_price
-            if candle_max_favorable > max_favorable:
-                max_favorable = candle_max_favorable
-            
-            if max_favorable >= 25.0 and not hit_25_pts:
-                hit_25_pts = True
-                time_hit_25 = str(h_time)
-                entry_dt = pd.to_datetime(f"{trading_date} {entry_time}")
-                hit_dt = pd.to_datetime(f"{trading_date} {h_time}")
-                time_to_25_pts_min = (hit_dt - entry_dt).total_seconds() / 60.0
-
             if c_close <= stop_loss:
                 exit_price = float(stop_loss)
                 exit_reason = f"Stop Loss Hit (Close) at {h_time}"
                 break
         else:
-            candle_max_favorable = entry_price - c_low
-            if candle_max_favorable > max_favorable:
-                max_favorable = candle_max_favorable
-
-            if max_favorable >= 25.0 and not hit_25_pts:
-                hit_25_pts = True
-                time_hit_25 = str(h_time)
-                entry_dt = pd.to_datetime(f"{trading_date} {entry_time}")
-                hit_dt = pd.to_datetime(f"{trading_date} {h_time}")
-                time_to_25_pts_min = (hit_dt - entry_dt).total_seconds() / 60.0
-
             if c_close >= stop_loss:
                 exit_price = float(stop_loss)
                 exit_reason = f"Stop Loss Hit (Close) at {h_time}"
@@ -433,10 +401,6 @@ def analyze_day(trading_date, day_df):
 
     result_row["exit_price"] = exit_price
     result_row["exit_reason"] = exit_reason
-    result_row["hit_25_pts"] = hit_25_pts
-    result_row["time_hit_25"] = time_hit_25
-    result_row["time_to_25_pts_min"] = time_to_25_pts_min
-    result_row["max_points_seen"] = round(max_favorable, 2)
 
     if breakout_type == "BUY":
         points = exit_price - entry_price
@@ -624,11 +588,6 @@ def main():
         valid_orb_days = int((~results_df["exit_reason"].str.contains("Filtered|No Data|Insufficient", na=False)).sum())
         stop_loss_hits = int(results_df["exit_reason"].str.contains("Stop Loss Hit", na=False).sum())
 
-        # +25 Points Metrics
-        trades_hit_25 = int((traded["hit_25_pts"] == True).sum())
-        pct_hit_25 = (trades_hit_25 / total_trades * 100) if total_trades else 0.0
-        hit_25_but_lost = int(((traded["hit_25_pts"] == True) & (traded["result"] == "Loss")).sum())
-
         print("\n" + "=" * 90)
         print(f"OVERALL SUMMARY REPORT: {START_YEAR} TO {current_year}")
         print("=" * 90)
@@ -642,9 +601,6 @@ def main():
         print(f"Stop Loss Hits                    : {stop_loss_hits}")
         print(f"Overall Win Rate (%)              : {overall_win_rate:.2f}%")
         print(f"Total Points Captured             : {overall_points:.2f}")
-        print("-" * 90)
-        print(f"Trades reaching +25 pts before SL : {trades_hit_25} out of {total_trades} ({pct_hit_25:.2f}%)")
-        print(f"Trades +25 pts up that turned LOSS : {hit_25_but_lost}")
         print("=" * 90)
 
         analyze_performance_summary(results_df)
