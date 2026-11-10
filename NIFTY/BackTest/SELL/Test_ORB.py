@@ -290,6 +290,7 @@ def analyze_day(trading_date, day_df):
         "day_open": None,
         "orb_high": None,
         "orb_low": None,
+        "orb_midpoint": None,
         "orb_range_pct": None,
         "trade_type": "No Trade",
         "entry_time": None,
@@ -323,9 +324,11 @@ def analyze_day(trading_date, day_df):
 
     orb_high = orb_candles["high"].max()
     orb_low = orb_candles["low"].min()
+    orb_midpoint = (orb_high + orb_low) / 2.0
 
     result_row["orb_high"] = float(orb_high)
     result_row["orb_low"] = float(orb_low)
+    result_row["orb_midpoint"] = float(orb_midpoint)
 
     orb_range_pct = ((orb_high - orb_low) / day_open) * 100
     result_row["orb_range_pct"] = round(orb_range_pct, 3)
@@ -349,7 +352,7 @@ def analyze_day(trading_date, day_df):
                 "type": "BUY",
                 "entry_time": c_time,
                 "entry_price": float(c_close),
-                "stop_loss": float(orb_low)
+                "stop_loss": float(orb_midpoint)  # Stop loss set to ORB midpoint
             }
             break
 
@@ -358,7 +361,7 @@ def analyze_day(trading_date, day_df):
                 "type": "SELL",
                 "entry_time": c_time,
                 "entry_price": float(c_close),
-                "stop_loss": float(orb_high)
+                "stop_loss": float(orb_midpoint)  # Stop loss set to ORB midpoint
             }
             break
 
@@ -580,7 +583,7 @@ def main():
         current_year = now_ist.year
 
         print("\n" + "=" * 100)
-        print("NIFTY 50 30-MIN OPEN RANGE BREAKOUT (ORB) + RANGE FILTER BACKTEST")
+        print("NIFTY 50 30-MIN OPEN RANGE BREAKOUT (ORB) + MIDPOINT STOP LOSS BACKTEST")
         print("=" * 100)
         print(f"Start year      : {START_YEAR}")
         print(f"Current year    : {current_year}")
