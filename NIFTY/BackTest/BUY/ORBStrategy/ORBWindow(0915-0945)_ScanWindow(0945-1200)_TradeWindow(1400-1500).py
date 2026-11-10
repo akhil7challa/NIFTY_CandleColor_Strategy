@@ -276,7 +276,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
 
 
 # ============================================================
-# ANALYZE ONE TRADING DAY
+# ANALYZE ONE TRADING DAY (UPDATED FOR 50% TARGET 1 & 50% RUNNER)
 # ============================================================
 
 def analyze_day(trading_date, day_df):
@@ -330,7 +330,8 @@ def analyze_day(trading_date, day_df):
     result_row["orb_low"] = float(orb_low)
     result_row["orb_midpoint"] = float(orb_midpoint)
 
-    orb_range_pct = ((orb_high - orb_low) / day_open) * 100
+    orb_range = orb_high - orb_low
+    orb_range_pct = (orb_range / day_open) * 100
     result_row["orb_range_pct"] = round(orb_range_pct, 3)
 
     if orb_range_pct < MIN_ORB_RANGE_PCT:
@@ -366,60 +367,82 @@ def analyze_day(trading_date, day_df):
     entry_price = float(entry_candle.iloc[0]["close"])
     entry_time = TRADE_ENTRY_TIME
 
-    # ========================================================
-    # NEW RULE: STOP LOSS SET TO FULL ORB BOUNDARIES
-    # BUY Stop Loss  = ORB Low
-    # SELL Stop Loss = ORB High
-    # ========================================================
+    # Initial Stop Loss & Targets Setup
     if breakout_type == "BUY":
         stop_loss = float(orb_low)
+        target_1_price = entry_price + (0.5 * orb_range)  # Target 1: 0.5x ORB range
     else:
         stop_loss = float(orb_high)
-    # ========================================================
+        target_1_price = entry_price - (0.5 * orb_range)
 
     result_row["trade_type"] = breakout_type
     result_row["entry_time"] = str(entry_time)
     result_row["entry_price"] = entry_price
     result_row["stop_loss"] = stop_loss
 
-    # 3. Holding period from after 14:00 up to EXIT_TIME (15:00)
+    # 3. Holding period from after 14:00 up to EXIT_TIME (15:00) with Partial Scaling
     holding_candles = day_df[
         (day_df["time_obj"] > entry_time) & 
         (day_df["time_obj"] <= EXIT_TIME)
     ]
 
-    exit_price = None
+    target_1_hit = False
+    target_1_exit_time = None
+    runner_exit_price = None
     exit_reason = "EOD Square-off"
+    current_stop = stop_loss
 
     for _, row in holding_candles.iterrows():
         c_close = row["close"]
+        c_high = row["high"]
+        c_low = row["low"]
         h_time = row["time_obj"]
 
         if breakout_type == "BUY":
-            if c_close <= stop_loss:
-                exit_price = float(stop_loss)
-                exit_reason = f"Stop Loss Hit (Close) at {h_time}"
+            # Check Target 1 (0.5x ORB Range) for first 50% of position
+            if not target_1_hit and c_high >= target_1_price:
+                target_1_hit = True
+                target_1_exit_time = h_time
+                current_stop = entry_price  # Move remaining position stop to break-even
+
+            # Check stop loss / breakeven hit for the remaining position
+            if c_close <= current_stop:
+                runner_exit_price = float(current_stop)
+                exit_reason = f"Stop/BE Hit at {h_time} (Stop: {current_stop})"
                 break
-        else:
-            if c_close >= stop_loss:
-                exit_price = float(stop_loss)
-                exit_reason = f"Stop Loss Hit (Close) at {h_time}"
+        else: # SELL
+            if not target_1_hit and c_low <= target_1_price:
+                target_1_hit = True
+                target_1_exit_time = h_time
+                current_stop = entry_price  # Move remaining position stop to break-even
+
+            if c_close >= current_stop:
+                runner_exit_price = float(current_stop)
+                exit_reason = f"Stop/BE Hit at {h_time} (Stop: {current_stop})"
                 break
 
-    if exit_price is None:
+    if runner_exit_price is None:
         if not holding_candles.empty:
-            exit_price = float(holding_candles.iloc[-1]["close"])
+            runner_exit_price = float(holding_candles.iloc[-1]["close"])
         else:
-            exit_price = entry_price
+            runner_exit_price = entry_price
 
-    result_row["exit_price"] = exit_price
-    result_row["exit_reason"] = exit_reason
-
-    if breakout_type == "BUY":
-        points = exit_price - entry_price
+    # Calculate points for 50/50 split between Target 1 and Runner (EOD / Stop)
+    if target_1_hit:
+        points_t1 = (target_1_price - entry_price) if breakout_type == "BUY" else (entry_price - target_1_price)
+        points_runner = (runner_exit_price - entry_price) if breakout_type == "BUY" else (entry_price - runner_exit_price)
+        points = (points_t1 * 0.5) + (points_runner * 0.5)
+        exit_reason = f"Target 1 Hit at {target_1_exit_time} (50%) + {exit_reason} (50%)"
+        exit_price = (target_1_price * 0.5) + (runner_exit_price * 0.5)
     else:
-        points = entry_price - exit_price
+        if breakout_type == "BUY":
+            points = runner_exit_price - entry_price
+        else:
+            points = entry_price - runner_exit_price
+        exit_price = runner_exit_price
 
+    result_row["exit_price"] = round(exit_price, 2)
+    result_row["exit_reason"] = exit_reason
     result_row["points"] = round(points, 2)
     result_row["result"] = "Win" if points > 0 else ("Loss" if points < 0 else "Breakeven")
 
@@ -508,7 +531,7 @@ def analyze_performance_summary(results_df):
         return
 
     print("\n" + "=" * 120)
-    print("STRATEGY PERFORMANCE SUMMARY (MORNING SCAN + 14:00 ENTRY EXECUTION)")
+    print("STRATEGY PERFORMANCE SUMMARY (50% TARGET 1 & 50% RUNNER WITH BE TRAIL)")
     print("=" * 120)
     print(f"Total Traded Days : {len(traded)}")
     wins = int((traded["result"] == "Win").sum())
@@ -529,7 +552,7 @@ def main():
         current_year = now_ist.year
 
         print("\n" + "=" * 100)
-        print("NIFTY 50 30-MIN ORB (9:50-12:00 SCAN) + 14:00 ENTRY BACKTEST")
+        print("NIFTY 50 ORB STRATEGY + PARTIAL PROFIT SCALING (0.5x TARGET 1)")
         print("=" * 100)
         print(f"Start year      : {START_YEAR}")
         print(f"Current year    : {current_year}")
@@ -599,7 +622,7 @@ def main():
 
         filtered_days = int(results_df["exit_reason"].str.contains("Filtered", na=False).sum())
         valid_orb_days = int((~results_df["exit_reason"].str.contains("Filtered|No Data|Insufficient", na=False)).sum())
-        stop_loss_hits = int(results_df["exit_reason"].str.contains("Stop Loss Hit", na=False).sum())
+        stop_loss_hits = int(results_df["exit_reason"].str.contains("Stop/BE Hit", na=False).sum())
 
         print("\n" + "=" * 90)
         print(f"OVERALL SUMMARY REPORT: {START_YEAR} TO {current_year}")
@@ -611,7 +634,7 @@ def main():
         print(f"Total Trades Taken                : {total_trades}")
         print(f"Winning Trades                    : {wins}")
         print(f"Losing Trades                     : {losses}")
-        print(f"Stop Loss Hits                    : {stop_loss_hits}")
+        print(f"Stop/BE Hits                      : {stop_loss_hits}")
         print(f"Overall Win Rate (%)              : {overall_win_rate:.2f}%")
         print(f"Total Points Captured             : {overall_points:.2f}")
         print("=" * 90)
