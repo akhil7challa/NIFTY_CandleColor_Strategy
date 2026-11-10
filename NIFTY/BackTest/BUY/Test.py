@@ -34,28 +34,13 @@ RETRY_BASE_SECONDS = 2
 # STRATEGY RULES
 # ============================================================
 
-#1 NOTE: Strategy Specific Times & Filters (30-min ORB: 9:15 to 9:45)
-    #ORB Window : 9:15 - 9:45
-    #Scan Window : 9:50 - 12:00
-    #Entry Time : 14:00
-    #Exit Time : 15:00
-
-#2 NOTE : The following MIN_ORB_RANGE_PCT levels and respective results are as follows:
-    #ORB Range : 0%   -> Trades taken : 2407 -> Gain Points : 34335 -> Winning Percentage : 61.03%
-    #ORB Range : 30%  -> Trades taken : 1911 -> Gain Points : 28736 -> Winning Percentage : 60.70%
-    #ORB Range : 35%  -> Trades taken : 1617 -> Gain Points : 25381 -> Winning Percentage : 61.47%
-    #ORB Range : 40%  -> Trades taken : 1354 -> Gain Points : 22206 -> Winning Percentage : 61.52%
-    #ORB Range : 45%  -> Trades taken : 1109 -> Gain Points : 18962 -> Winning Percentage : 61.68%
-    #ORB Range : 50%  -> Trades taken : 874  -> Gain Points : 16414 -> Winning Percentage : 62.93%
-
-
 ORB_START_TIME = time(9, 15)
 ORB_END_TIME = time(9, 45)
 TRADE_SCAN_START_TIME = time(9, 50)  # Scan starts after 9:45 candle
 TRADE_DEADLINE_TIME = time(12, 0)    # Scan deadline at 12:00
 TRADE_ENTRY_TIME = time(14, 0)       # Take trade at 14:00 if breakout happened
 EXIT_TIME = time(15, 0)
-MIN_ORB_RANGE_PCT = 0.0
+MIN_ORB_RANGE_PCT = 0.0  # Minimum range required filter percentage
 
 CANDLE_COLUMNS = [
     "timestamp", "open", "high", "low", "close", "volume"
@@ -291,7 +276,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
 
 
 # ============================================================
-# ANALYZE ONE TRADING DAY (ORB SCAN + 14:00 ENTRY + MIDPOINT SL)
+# ANALYZE ONE TRADING DAY
 # ============================================================
 
 def analyze_day(trading_date, day_df):
@@ -372,7 +357,7 @@ def analyze_day(trading_date, day_df):
     if not breakout_type:
         return result_row
 
-    # 2. If morning breakout happened, take trade at 14:00 candle close
+    # 2. Check 14:00 entry candle existence
     entry_candle = day_df[day_df["time_obj"] == TRADE_ENTRY_TIME]
     if entry_candle.empty:
         result_row["exit_reason"] = "No 14:00 Entry Candle"
@@ -380,7 +365,17 @@ def analyze_day(trading_date, day_df):
 
     entry_price = float(entry_candle.iloc[0]["close"])
     entry_time = TRADE_ENTRY_TIME
-    stop_loss = float(orb_midpoint)
+
+    # ========================================================
+    # NEW RULE: STOP LOSS SET TO FULL ORB BOUNDARIES
+    # BUY Stop Loss  = ORB Low
+    # SELL Stop Loss = ORB High
+    # ========================================================
+    if breakout_type == "BUY":
+        stop_loss = float(orb_low)
+    else:
+        stop_loss = float(orb_high)
+    # ========================================================
 
     result_row["trade_type"] = breakout_type
     result_row["entry_time"] = str(entry_time)
