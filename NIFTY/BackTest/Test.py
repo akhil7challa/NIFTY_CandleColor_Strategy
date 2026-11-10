@@ -33,8 +33,9 @@ RETRY_BASE_SECONDS = 2
 # Strategy Specific Times & Filters (30-min ORB: 9:15 to 9:45)
 ORB_START_TIME = time(9, 15)
 ORB_END_TIME = time(9, 45)
-TRADE_SCAN_START_TIME = time(9, 50)  # Starts after the 9:45 candle closes
-TRADE_DEADLINE_TIME = time(12, 0)
+TRADE_SCAN_START_TIME = time(9, 50)  # Scan starts after 9:45 candle
+TRADE_DEADLINE_TIME = time(12, 0)    # Scan deadline at 12:00
+TRADE_ENTRY_TIME = time(14, 0)       # Take trade at 14:00 if breakout happened
 EXIT_TIME = time(15, 0)
 MIN_ORB_RANGE_PCT = 0.5  # Minimum 0.5% range required
 
@@ -272,7 +273,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
 
 
 # ============================================================
-# ANALYZE ONE TRADING DAY (ORB + MFE +25 PTS TRACKING)
+# ANALYZE ONE TRADING DAY (ORB SCAN + 14:00 ENTRY + MIDPOINT SL)
 # ============================================================
 
 def analyze_day(trading_date, day_df):
@@ -337,47 +338,42 @@ def analyze_day(trading_date, day_df):
         result_row["exit_reason"] = f"ORB Range {orb_range_pct:.2f}% < {MIN_ORB_RANGE_PCT}% (Filtered)"
         return result_row
 
+    # 1. Scan for breakout strictly between 9:50 and 12:00
     scan_candles = day_df[
         (day_df["time_obj"] >= TRADE_SCAN_START_TIME) & 
         (day_df["time_obj"] <= TRADE_DEADLINE_TIME)
     ]
 
-    triggered_trade = None
+    breakout_type = None
     for _, row in scan_candles.iterrows():
         c_close = row["close"]
-        c_time = row["time_obj"]
 
         if c_close > orb_high:
-            triggered_trade = {
-                "type": "BUY",
-                "entry_time": c_time,
-                "entry_price": float(c_close),
-                "stop_loss": float(orb_midpoint)  # Stop loss set to ORB midpoint
-            }
+            breakout_type = "BUY"
             break
-
         elif c_close < orb_low:
-            triggered_trade = {
-                "type": "SELL",
-                "entry_time": c_time,
-                "entry_price": float(c_close),
-                "stop_loss": float(orb_midpoint)  # Stop loss set to ORB midpoint
-            }
+            breakout_type = "SELL"
             break
 
-    if not triggered_trade:
+    if not breakout_type:
         return result_row
 
-    trade_type = triggered_trade["type"]
-    entry_time = triggered_trade["entry_time"]
-    entry_price = triggered_trade["entry_price"]
-    stop_loss = triggered_trade["stop_loss"]
+    # 2. If morning breakout happened, take trade at 14:00 candle close
+    entry_candle = day_df[day_df["time_obj"] == TRADE_ENTRY_TIME]
+    if entry_candle.empty:
+        result_row["exit_reason"] = "No 14:00 Entry Candle"
+        return result_row
 
-    result_row["trade_type"] = trade_type
+    entry_price = float(entry_candle.iloc[0]["close"])
+    entry_time = TRADE_ENTRY_TIME
+    stop_loss = float(orb_midpoint)
+
+    result_row["trade_type"] = breakout_type
     result_row["entry_time"] = str(entry_time)
     result_row["entry_price"] = entry_price
     result_row["stop_loss"] = stop_loss
 
+    # 3. Holding period from after 14:00 up to EXIT_TIME (15:00)
     holding_candles = day_df[
         (day_df["time_obj"] > entry_time) & 
         (day_df["time_obj"] <= EXIT_TIME)
@@ -396,7 +392,7 @@ def analyze_day(trading_date, day_df):
         c_close = row["close"]
         h_time = row["time_obj"]
 
-        if trade_type == "BUY":
+        if breakout_type == "BUY":
             candle_max_favorable = c_high - entry_price
             if candle_max_favorable > max_favorable:
                 max_favorable = candle_max_favorable
@@ -442,7 +438,7 @@ def analyze_day(trading_date, day_df):
     result_row["time_to_25_pts_min"] = time_to_25_pts_min
     result_row["max_points_seen"] = round(max_favorable, 2)
 
-    if trade_type == "BUY":
+    if breakout_type == "BUY":
         points = exit_price - entry_price
     else:
         points = entry_price - exit_price
@@ -525,50 +521,23 @@ def build_yearly_summary(results_df):
 
 
 # ============================================================
-# TIME OF DAY PERFORMANCE ANALYSIS
+# PERFORMANCE REPORTING
 # ============================================================
 
-def analyze_time_of_day_performance(results_df):
+def analyze_performance_summary(results_df):
     traded = results_df[results_df["result"].isin(["Win", "Loss", "Breakeven"])].copy()
     if traded.empty:
-        print("\nNo trades available for time-of-day analysis.")
+        print("\nNo trades available for performance analysis.")
         return
 
-    def get_time_bucket(entry_str):
-        t = pd.to_datetime(str(entry_str), format="%H:%M:%S").time()
-        if t < time(10, 15):
-            return "09:50 - 10:15 (Early Breakout)"
-        elif t < time(11, 0):
-            return "10:15 - 11:00 (Mid Morning)"
-        elif t < time(11, 45):
-            return "11:00 - 11:45 (Late Morning)"
-        else:
-            return "11:45 - 12:00 (Pre-Noon Cutoff)"
-
-    traded["time_bucket"] = traded["entry_time"].apply(get_time_bucket)
-
-    grouped = traded.groupby("time_bucket").agg(
-        total_trades=("hit_25_pts", "count"),
-        hit_25_count=("hit_25_pts", lambda x: int(x.sum())),
-        wins=("result", lambda x: int((x == "Win").sum())),
-        losses=("result", lambda x: int((x == "Loss").sum())),
-        avg_pts=("points", "mean")
-    ).reset_index()
-
-    grouped["pct_hit_25"] = (grouped["hit_25_count"] / grouped["total_trades"] * 100).round(2)
-    grouped["win_rate_pct"] = (grouped["wins"] / grouped["total_trades"] * 100).round(2)
-    grouped["avg_pts"] = grouped["avg_pts"].round(2)
-
-    hit_25_trades = traded[traded["hit_25_pts"] == True]
-    avg_minutes_to_25 = hit_25_trades["time_to_25_pts_min"].mean() if not hit_25_trades.empty else 0.0
-
     print("\n" + "=" * 120)
-    print("BEST & WORST ENTRY TIME SLOTS FOR REACHING +25 POINTS")
+    print("STRATEGY PERFORMANCE SUMMARY (MORNING SCAN + 14:00 ENTRY EXECUTION)")
     print("=" * 120)
-    print(grouped[["time_bucket", "total_trades", "hit_25_count", "pct_hit_25", "win_rate_pct", "avg_pts"]].to_string(index=False))
-    print("-" * 120)
-    if not hit_25_trades.empty:
-        print(f"Average duration from entry to touch +25 pts : {avg_minutes_to_25:.1f} minutes")
+    print(f"Total Traded Days : {len(traded)}")
+    wins = int((traded["result"] == "Win").sum())
+    win_rate = (wins / len(traded) * 100) if len(traded) else 0.0
+    print(f"Winning Trades    : {wins} ({win_rate:.2f}%)")
+    print(f"Total Points      : {traded['points'].sum():.2f}")
     print("=" * 120)
 
 
@@ -583,7 +552,7 @@ def main():
         current_year = now_ist.year
 
         print("\n" + "=" * 100)
-        print("NIFTY 50 30-MIN OPEN RANGE BREAKOUT (ORB) + MIDPOINT STOP LOSS BACKTEST")
+        print("NIFTY 50 30-MIN ORB (9:50-12:00 SCAN) + 14:00 ENTRY BACKTEST")
         print("=" * 100)
         print(f"Start year      : {START_YEAR}")
         print(f"Current year    : {current_year}")
@@ -678,8 +647,7 @@ def main():
         print(f"Trades +25 pts up that turned LOSS : {hit_25_but_lost}")
         print("=" * 90)
 
-        # Run time-of-day breakout analysis
-        analyze_time_of_day_performance(results_df)
+        analyze_performance_summary(results_df)
 
     except Exception as exc:
         print(f"\nERROR: {exc}")
