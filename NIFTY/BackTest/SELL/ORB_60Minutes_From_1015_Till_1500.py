@@ -30,11 +30,12 @@ START_YEAR = 2015
 MAX_RETRIES = 4
 RETRY_BASE_SECONDS = 2
 
-# Strategy Specific Times & Filters
+# Strategy Specific Times & Filters (30-min ORB: 9:15 to 9:45)
 ORB_START_TIME = time(9, 15)
-ORB_END_TIME = time(10, 15)
-TRADE_SCAN_START_TIME = time(10, 20)
-TRADE_DEADLINE_TIME = time(12, 0)
+ORB_END_TIME = time(9, 45)
+TRADE_SCAN_START_TIME = time(9, 50)  # Scan starts after 9:45 candle
+TRADE_DEADLINE_TIME = time(12, 0)    # Scan deadline at 12:00
+TRADE_ENTRY_TIME = time(14, 0)       # Take trade at 14:00 if breakout happened
 EXIT_TIME = time(15, 0)
 MIN_ORB_RANGE_PCT = 0.5  # Minimum 0.5% range required
 
@@ -272,7 +273,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
 
 
 # ============================================================
-# ANALYZE ONE TRADING DAY (ORB STRATEGY WITH RANGE % FILTER)
+# ANALYZE ONE TRADING DAY (ORB SCAN + 14:00 ENTRY + MIDPOINT SL)
 # ============================================================
 
 def analyze_day(trading_date, day_df):
@@ -290,6 +291,7 @@ def analyze_day(trading_date, day_df):
         "day_open": None,
         "orb_high": None,
         "orb_low": None,
+        "orb_midpoint": None,
         "orb_range_pct": None,
         "trade_type": "No Trade",
         "entry_time": None,
@@ -298,7 +300,11 @@ def analyze_day(trading_date, day_df):
         "exit_price": None,
         "exit_reason": "No Breakout",
         "points": 0.0,
-        "result": "No Trade"
+        "result": "No Trade",
+        "hit_25_pts": False,
+        "max_points_seen": 0.0,
+        "time_hit_25": None,
+        "time_to_25_pts_min": None
     }
 
     if day_df.empty:
@@ -313,15 +319,17 @@ def analyze_day(trading_date, day_df):
         (day_df["time_obj"] <= ORB_END_TIME)
     ]
 
-    if orb_candles.empty or len(orb_candles) < 10:
+    if orb_candles.empty or len(orb_candles) < 5:
         result_row["exit_reason"] = "Insufficient ORB Data"
         return result_row
 
     orb_high = orb_candles["high"].max()
     orb_low = orb_candles["low"].min()
+    orb_midpoint = (orb_high + orb_low) / 2.0
 
     result_row["orb_high"] = float(orb_high)
     result_row["orb_low"] = float(orb_low)
+    result_row["orb_midpoint"] = float(orb_midpoint)
 
     orb_range_pct = ((orb_high - orb_low) / day_open) * 100
     result_row["orb_range_pct"] = round(orb_range_pct, 3)
@@ -330,47 +338,42 @@ def analyze_day(trading_date, day_df):
         result_row["exit_reason"] = f"ORB Range {orb_range_pct:.2f}% < {MIN_ORB_RANGE_PCT}% (Filtered)"
         return result_row
 
+    # 1. Scan for breakout strictly between 9:50 and 12:00
     scan_candles = day_df[
         (day_df["time_obj"] >= TRADE_SCAN_START_TIME) & 
         (day_df["time_obj"] <= TRADE_DEADLINE_TIME)
     ]
 
-    triggered_trade = None
+    breakout_type = None
     for _, row in scan_candles.iterrows():
         c_close = row["close"]
-        c_time = row["time_obj"]
 
         if c_close > orb_high:
-            triggered_trade = {
-                "type": "BUY",
-                "entry_time": c_time,
-                "entry_price": float(c_close),
-                "stop_loss": float(orb_low)
-            }
+            breakout_type = "BUY"
             break
-
         elif c_close < orb_low:
-            triggered_trade = {
-                "type": "SELL",
-                "entry_time": c_time,
-                "entry_price": float(c_close),
-                "stop_loss": float(orb_high)
-            }
+            breakout_type = "SELL"
             break
 
-    if not triggered_trade:
+    if not breakout_type:
         return result_row
 
-    trade_type = triggered_trade["type"]
-    entry_time = triggered_trade["entry_time"]
-    entry_price = triggered_trade["entry_price"]
-    stop_loss = triggered_trade["stop_loss"]
+    # 2. If morning breakout happened, take trade at 14:00 candle close
+    entry_candle = day_df[day_df["time_obj"] == TRADE_ENTRY_TIME]
+    if entry_candle.empty:
+        result_row["exit_reason"] = "No 14:00 Entry Candle"
+        return result_row
 
-    result_row["trade_type"] = trade_type
+    entry_price = float(entry_candle.iloc[0]["close"])
+    entry_time = TRADE_ENTRY_TIME
+    stop_loss = float(orb_midpoint)
+
+    result_row["trade_type"] = breakout_type
     result_row["entry_time"] = str(entry_time)
     result_row["entry_price"] = entry_price
     result_row["stop_loss"] = stop_loss
 
+    # 3. Holding period from after 14:00 up to EXIT_TIME (15:00)
     holding_candles = day_df[
         (day_df["time_obj"] > entry_time) & 
         (day_df["time_obj"] <= EXIT_TIME)
@@ -378,17 +381,45 @@ def analyze_day(trading_date, day_df):
 
     exit_price = None
     exit_reason = "EOD Square-off"
+    max_favorable = 0.0
+    hit_25_pts = False
+    time_hit_25 = None
+    time_to_25_pts_min = None
 
     for _, row in holding_candles.iterrows():
+        c_high = row["high"]
+        c_low = row["low"]
         c_close = row["close"]
         h_time = row["time_obj"]
 
-        if trade_type == "BUY":
+        if breakout_type == "BUY":
+            candle_max_favorable = c_high - entry_price
+            if candle_max_favorable > max_favorable:
+                max_favorable = candle_max_favorable
+            
+            if max_favorable >= 25.0 and not hit_25_pts:
+                hit_25_pts = True
+                time_hit_25 = str(h_time)
+                entry_dt = pd.to_datetime(f"{trading_date} {entry_time}")
+                hit_dt = pd.to_datetime(f"{trading_date} {h_time}")
+                time_to_25_pts_min = (hit_dt - entry_dt).total_seconds() / 60.0
+
             if c_close <= stop_loss:
                 exit_price = float(stop_loss)
                 exit_reason = f"Stop Loss Hit (Close) at {h_time}"
                 break
         else:
+            candle_max_favorable = entry_price - c_low
+            if candle_max_favorable > max_favorable:
+                max_favorable = candle_max_favorable
+
+            if max_favorable >= 25.0 and not hit_25_pts:
+                hit_25_pts = True
+                time_hit_25 = str(h_time)
+                entry_dt = pd.to_datetime(f"{trading_date} {entry_time}")
+                hit_dt = pd.to_datetime(f"{trading_date} {h_time}")
+                time_to_25_pts_min = (hit_dt - entry_dt).total_seconds() / 60.0
+
             if c_close >= stop_loss:
                 exit_price = float(stop_loss)
                 exit_reason = f"Stop Loss Hit (Close) at {h_time}"
@@ -402,8 +433,12 @@ def analyze_day(trading_date, day_df):
 
     result_row["exit_price"] = exit_price
     result_row["exit_reason"] = exit_reason
+    result_row["hit_25_pts"] = hit_25_pts
+    result_row["time_hit_25"] = time_hit_25
+    result_row["time_to_25_pts_min"] = time_to_25_pts_min
+    result_row["max_points_seen"] = round(max_favorable, 2)
 
-    if trade_type == "BUY":
+    if breakout_type == "BUY":
         points = exit_price - entry_price
     else:
         points = entry_price - exit_price
@@ -429,7 +464,6 @@ def build_monthly_summary(results_df, fetch_status_df):
 
             wins = int((traded["result"] == "Win").sum())
             losses = int((traded["result"] == "Loss").sum())
-            breakevens = int((traded["result"] == "Breakeven").sum())
             total_trades = len(traded)
 
             win_rate = (wins / total_trades * 100) if total_trades else 0.0
@@ -480,10 +514,31 @@ def build_yearly_summary(results_df):
             "losses": losses,
             "win_rate_percent": round(win_rate, 2),
             "total_points": round(total_points, 2),
-            "no_trade": int((year_df["result"] == "No Trade").sum())
+            "no_trade": int(year_df["exit_reason"].str.contains("No Breakout", na=False).sum())
         })
 
     return pd.DataFrame(yearly_rows)
+
+
+# ============================================================
+# PERFORMANCE REPORTING
+# ============================================================
+
+def analyze_performance_summary(results_df):
+    traded = results_df[results_df["result"].isin(["Win", "Loss", "Breakeven"])].copy()
+    if traded.empty:
+        print("\nNo trades available for performance analysis.")
+        return
+
+    print("\n" + "=" * 120)
+    print("STRATEGY PERFORMANCE SUMMARY (MORNING SCAN + 14:00 ENTRY EXECUTION)")
+    print("=" * 120)
+    print(f"Total Traded Days : {len(traded)}")
+    wins = int((traded["result"] == "Win").sum())
+    win_rate = (wins / len(traded) * 100) if len(traded) else 0.0
+    print(f"Winning Trades    : {wins} ({win_rate:.2f}%)")
+    print(f"Total Points      : {traded['points'].sum():.2f}")
+    print("=" * 120)
 
 
 # ============================================================
@@ -497,11 +552,11 @@ def main():
         current_year = now_ist.year
 
         print("\n" + "=" * 100)
-        print("NIFTY 50 OPEN RANGE BREAKOUT (ORB) + RANGE FILTER BACKTEST")
+        print("NIFTY 50 30-MIN ORB (9:50-12:00 SCAN) + 14:00 ENTRY BACKTEST")
         print("=" * 100)
-        print(f"Start year       : {START_YEAR}")
-        print(f"Current year     : {current_year}")
-        print(f"Min ORB Range %  : {MIN_ORB_RANGE_PCT}%")
+        print(f"Start year      : {START_YEAR}")
+        print(f"Current year    : {current_year}")
+        print(f"Min ORB Range % : {MIN_ORB_RANGE_PCT}%")
         print("=" * 100)
 
         smart_api = login_to_smartapi()
@@ -555,7 +610,9 @@ def main():
         print("=" * 130)
         print(yearly_df.to_string(index=False))
 
-        # Overall Metrics
+        # ========================================================
+        # DETAILED OVERALL PERFORMANCE BREAKDOWN
+        # ========================================================
         traded = results_df[results_df["result"].isin(["Win", "Loss", "Breakeven"])]
         wins = int((traded["result"] == "Win").sum())
         losses = int((traded["result"] == "Loss").sum())
@@ -563,16 +620,34 @@ def main():
         overall_win_rate = (wins / total_trades * 100) if total_trades else 0.0
         overall_points = float(traded["points"].sum())
 
+        filtered_days = int(results_df["exit_reason"].str.contains("Filtered", na=False).sum())
+        valid_orb_days = int((~results_df["exit_reason"].str.contains("Filtered|No Data|Insufficient", na=False)).sum())
+        stop_loss_hits = int(results_df["exit_reason"].str.contains("Stop Loss Hit", na=False).sum())
+
+        # +25 Points Metrics
+        trades_hit_25 = int((traded["hit_25_pts"] == True).sum())
+        pct_hit_25 = (trades_hit_25 / total_trades * 100) if total_trades else 0.0
+        hit_25_but_lost = int(((traded["hit_25_pts"] == True) & (traded["result"] == "Loss")).sum())
+
         print("\n" + "=" * 90)
-        print(f"OVERALL SUMMARY: {START_YEAR} TO {current_year}")
+        print(f"OVERALL SUMMARY REPORT: {START_YEAR} TO {current_year}")
         print("=" * 90)
-        print(f"Total Trading Days       : {len(results_df)}")
-        print(f"Total Trades Taken       : {total_trades}")
-        print(f"Winning Trades           : {wins}")
-        print(f"Losing Trades            : {losses}")
-        print(f"Overall Win Rate         : {overall_win_rate:.2f}%")
-        print(f"Total Points Captured    : {overall_points:.2f}")
+        print(f"Total Trading Days Analyzed       : {len(results_df)}")
+        print(f"Days within Expected ORB Range    : {valid_orb_days}")
+        print(f"Days Filtered (Outside ORB Range) : {filtered_days}")
+        print("-" * 90)
+        print(f"Total Trades Taken                : {total_trades}")
+        print(f"Winning Trades                    : {wins}")
+        print(f"Losing Trades                     : {losses}")
+        print(f"Stop Loss Hits                    : {stop_loss_hits}")
+        print(f"Overall Win Rate (%)              : {overall_win_rate:.2f}%")
+        print(f"Total Points Captured             : {overall_points:.2f}")
+        print("-" * 90)
+        print(f"Trades reaching +25 pts before SL : {trades_hit_25} out of {total_trades} ({pct_hit_25:.2f}%)")
+        print(f"Trades +25 pts up that turned LOSS : {hit_25_but_lost}")
         print("=" * 90)
+
+        analyze_performance_summary(results_df)
 
     except Exception as exc:
         print(f"\nERROR: {exc}")
