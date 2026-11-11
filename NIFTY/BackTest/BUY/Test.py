@@ -18,14 +18,14 @@ CLIENT_CODE = "AAAD431807"
 PASSWORD = "1606"
 TOTP_SECRET = "H2FHHI2DVFW5HK64J3GQWMVZ3E"
 
-EXCHANGE = "NSE"
-SYMBOL_TOKEN = "99926000"  # NIFTY 50
-#EXCHANGE = "BSE"
-#SYMBOL_TOKEN = "99919000"  # SENSEX
+#EXCHANGE = "NSE"
+#SYMBOL_TOKEN = "99926000"  # NIFTY 50
+EXCHANGE = "BSE"
+SYMBOL_TOKEN = "99919000"  # SENSEX
 #EXCHANGE = "NSE"
 #SYMBOL_TOKEN = "99926009"  # BANK NIFTY
 
-INTERVAL = "ONE_MINUTE"     # Switched to 1-minute candles for precise intra-candle execution
+INTERVAL = "ONE_MINUTE"    # Switched to 1-minute candles for precise intra-candle execution
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -381,17 +381,18 @@ def analyze_day(trading_date, day_df):
     # Initial Stop Loss & Target 1 Setup
     if breakout_type == "BUY":
         stop_loss = float(orb_low)
-        target_1_price = entry_price + (0.5 * orb_range)
     else:
         stop_loss = float(orb_high)
-        target_1_price = entry_price - (0.5 * orb_range)
 
     result_row["trade_type"] = breakout_type
     result_row["entry_time"] = str(entry_time)
     result_row["entry_price"] = entry_price
     result_row["stop_loss"] = stop_loss
 
-    # 3. Holding period evaluated on 1-MINUTE candles from after 14:00 up to EXIT_TIME (15:00)
+    # ============================================================
+    # HOLDING PERIOD & STEPPED TRAILING STOP-LOSS LOGIC
+    # ============================================================
+
     holding_candles = day_df[
         (day_df["time_obj"] > entry_time) & 
         (day_df["time_obj"] <= EXIT_TIME)
@@ -401,6 +402,7 @@ def analyze_day(trading_date, day_df):
     exit_price = None
     exit_reason = "EOD Square-off"
     current_stop = stop_loss
+    highest_multiplier_reached = 0.5  # Track milestones starting from 0.5
 
     for _, row in holding_candles.iterrows():
         c_close = row["close"]
@@ -409,22 +411,46 @@ def analyze_day(trading_date, day_df):
         h_time = row["time_obj"]
 
         if breakout_type == "BUY":
-            if not target_1_hit and c_high >= target_1_price:
-                target_1_hit = True
-                current_stop = entry_price  # Move entire position stop to break-even
+            favorable_move_mult = (c_high - entry_price) / orb_range if orb_range > 0 else 0
 
+            # 1. Check if Target 1 (0.5) is hit for the first time
+            if not target_1_hit and favorable_move_mult >= 0.5:
+                target_1_hit = True
+                current_stop = entry_price  # Move to break-even
+
+            # 2. Once Target 1 is hit, check for higher 0.1 step milestones (0.6, 0.7, 0.8, 0.9, 1.0...)
+            if target_1_hit:
+                current_mult_tier = 0.5 + int((favorable_move_mult - 0.5) / 0.1) * 0.1
+                
+                if current_mult_tier > highest_multiplier_reached:
+                    highest_multiplier_reached = current_mult_tier
+                    lock_in_offset = (highest_multiplier_reached - 0.5) * orb_range
+                    current_stop = entry_price + lock_in_offset
+
+            # Check if stop loss is hit by current candle close
             if c_close <= current_stop:
                 exit_price = float(current_stop)
-                exit_reason = f"Stop/BE Hit at {h_time} (Stop: {current_stop})"
+                exit_reason = f"Trailing Stop Hit at {h_time} (Stop: {current_stop:.2f}, Tier: {highest_multiplier_reached:.1f})"
                 break
+                
         else: # SELL
-            if not target_1_hit and c_low <= target_1_price:
+            favorable_move_mult = (entry_price - c_low) / orb_range if orb_range > 0 else 0
+
+            if not target_1_hit and favorable_move_mult >= 0.5:
                 target_1_hit = True
-                current_stop = entry_price  # Move entire position stop to break-even
+                current_stop = entry_price  # Move to break-even
+
+            if target_1_hit:
+                current_mult_tier = 0.5 + int((favorable_move_mult - 0.5) / 0.1) * 0.1
+                
+                if current_mult_tier > highest_multiplier_reached:
+                    highest_multiplier_reached = current_mult_tier
+                    lock_in_offset = (highest_multiplier_reached - 0.5) * orb_range
+                    current_stop = entry_price - lock_in_offset
 
             if c_close >= current_stop:
                 exit_price = float(current_stop)
-                exit_reason = f"Stop/BE Hit at {h_time} (Stop: {current_stop})"
+                exit_reason = f"Trailing Stop Hit at {h_time} (Stop: {current_stop:.2f}, Tier: {highest_multiplier_reached:.1f})"
                 break
 
     if exit_price is None:
@@ -638,7 +664,7 @@ def main():
 
         filtered_days = int(results_df["exit_reason"].str.contains("Filtered", na=False).sum())
         valid_orb_days = int((~results_df["exit_reason"].str.contains("Filtered|No Data|Insufficient", na=False)).sum())
-        stop_loss_hits = int(results_df["exit_reason"].str.contains("Stop/BE Hit", na=False).sum())
+        stop_loss_hits = int(results_df["exit_reason"].str.contains("Trailing Stop Hit", na=False).sum())
 
         print("\n" + "=" * 90)
         print(f"OVERALL SUMMARY REPORT (1-MIN): {START_YEAR} TO {current_year}")
@@ -650,7 +676,7 @@ def main():
         print(f"Total Trades Taken                : {total_trades}")
         print(f"Winning Trades                    : {wins}")
         print(f"Losing Trades                     : {losses}")
-        print(f"Stop/BE Hits                      : {stop_loss_hits}")
+        print(f"Trailing Stop Hits                : {stop_loss_hits}")
         print(f"Overall Win Rate (%)              : {overall_win_rate:.2f}%")
         print(f"Total Positive Points (Gross)     : {gross_profit:.2f}")
         print(f"Total Negative Points (Gross)     : {gross_loss:.2f}")
