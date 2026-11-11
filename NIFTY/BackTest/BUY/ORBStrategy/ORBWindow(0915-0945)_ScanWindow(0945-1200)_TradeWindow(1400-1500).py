@@ -20,7 +20,12 @@ TOTP_SECRET = "H2FHHI2DVFW5HK64J3GQWMVZ3E"
 
 EXCHANGE = "NSE"
 SYMBOL_TOKEN = "99926000"  # NIFTY 50
-INTERVAL = "FIVE_MINUTE"
+#EXCHANGE = "BSE"
+#SYMBOL_TOKEN = "99919000"  # SENSEX
+#EXCHANGE = "NSE"
+#SYMBOL_TOKEN = "99926009"  # BANK NIFTY
+
+INTERVAL = "ONE_MINUTE"     # Switched to 1-minute candles for precise intra-candle execution
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -135,8 +140,8 @@ def fetch_historical_data(smart_api, from_date, to_date):
 
         if attempt < MAX_RETRIES:
             delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1))
-            print(f"  Attempt {attempt}/{MAX_RETRIES} failed: {last_error}")
-            print(f"  Retrying in {delay} seconds...")
+            print(f"   Attempt {attempt}/{MAX_RETRIES} failed: {last_error}")
+            print(f"   Retrying in {delay} seconds...")
             time_module.sleep(delay)
 
     raise RuntimeError(
@@ -154,7 +159,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
     today = now_ist.date()
 
     print("\n" + "=" * 90)
-    print(f"FETCHING NIFTY 50 DATA FOR {year}")
+    print(f"FETCHING 1-MINUTE NIFTY 50 DATA FOR {year}")
     print("=" * 90)
 
     if year > today.year:
@@ -204,8 +209,8 @@ def fetch_year_historical_data(smart_api, year, now_ist):
             continue
 
         print(f"\nFetching {month_name} {year}")
-        print(f"  From: {start_dt}")
-        print(f"  To  : {end_dt}")
+        print(f"   From: {start_dt}")
+        print(f"   To  : {end_dt}")
 
         try:
             month_df = fetch_historical_data(smart_api, start_dt, end_dt)
@@ -239,7 +244,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
                 continue
 
             count = len(month_df)
-            print(f"  Candles received: {count}")
+            print(f"   Candles received: {count}")
             all_data.append(month_df)
 
             fetch_status.append({
@@ -253,7 +258,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
 
         except Exception as exc:
             error_text = str(exc)
-            print(f"  ERROR: {error_text}")
+            print(f"   ERROR: {error_text}")
             fetch_status.append({
                 "year": year,
                 "month": month,
@@ -273,12 +278,12 @@ def fetch_year_historical_data(smart_api, year, now_ist):
     combined_df = convert_dataframe_to_ist(combined_df)
     combined_df = combined_df[combined_df["timestamp"] <= now_ist].copy()
 
-    print(f"\nTotal candles for {year}: {len(combined_df)}")
+    print(f"\nTotal 1-min candles for {year}: {len(combined_df)}")
     return combined_df, status_df
 
 
 # ============================================================
-# ANALYZE ONE TRADING DAY (UPDATED WITH SOLUTION 1 BREAKOUT)
+# ANALYZE ONE TRADING DAY (USING 1-MIN FOR ACCURATE EXECUTION)
 # ============================================================
 
 def analyze_day(trading_date, day_df):
@@ -315,12 +320,13 @@ def analyze_day(trading_date, day_df):
     day_open = float(day_df.iloc[0]["open"])
     result_row["day_open"] = day_open
 
+    # ORB range calculated from 09:15 to 09:45 using 1-minute bars
     orb_candles = day_df[
         (day_df["time_obj"] >= ORB_START_TIME) & 
         (day_df["time_obj"] <= ORB_END_TIME)
     ]
 
-    if orb_candles.empty or len(orb_candles) < 5:
+    if orb_candles.empty or len(orb_candles) < 15:
         result_row["exit_reason"] = "Insufficient ORB Data"
         return result_row
 
@@ -340,7 +346,7 @@ def analyze_day(trading_date, day_df):
         result_row["exit_reason"] = f"ORB Range {orb_range_pct:.2f}% < {MIN_ORB_RANGE_PCT}% (Filtered)"
         return result_row
 
-    # 1. Scan for breakout strictly between 9:50 and 12:00 using Solution 1 (High/Low Piercing)
+    # 1. Scan for breakout strictly between 9:50 and 12:00
     scan_candles = day_df[
         (day_df["time_obj"] >= TRADE_SCAN_START_TIME) & 
         (day_df["time_obj"] <= TRADE_DEADLINE_TIME)
@@ -375,7 +381,7 @@ def analyze_day(trading_date, day_df):
     # Initial Stop Loss & Target 1 Setup
     if breakout_type == "BUY":
         stop_loss = float(orb_low)
-        target_1_price = entry_price + (0.5 * orb_range)  # Target 1: 0.5x ORB range
+        target_1_price = entry_price + (0.5 * orb_range)
     else:
         stop_loss = float(orb_high)
         target_1_price = entry_price - (0.5 * orb_range)
@@ -385,7 +391,7 @@ def analyze_day(trading_date, day_df):
     result_row["entry_price"] = entry_price
     result_row["stop_loss"] = stop_loss
 
-    # 3. Holding period from after 14:00 up to EXIT_TIME (15:00) with 100% BE Trail
+    # 3. Holding period evaluated on 1-MINUTE candles from after 14:00 up to EXIT_TIME (15:00)
     holding_candles = day_df[
         (day_df["time_obj"] > entry_time) & 
         (day_df["time_obj"] <= EXIT_TIME)
@@ -496,6 +502,10 @@ def build_yearly_summary(results_df):
         losses = int((traded["result"] == "Loss").sum())
         total_trades = len(traded)
         win_rate = (wins / total_trades * 100) if total_trades else 0.0
+        
+        gross_profit = float(traded[traded["points"] > 0]["points"].sum())
+        gross_loss = float(abs(traded[traded["points"] < 0]["points"].sum()))
+        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
         total_points = float(traded["points"].sum())
 
         yearly_rows.append({
@@ -505,6 +515,9 @@ def build_yearly_summary(results_df):
             "wins": wins,
             "losses": losses,
             "win_rate_percent": round(win_rate, 2),
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "profit_factor": profit_factor,
             "total_points": round(total_points, 2),
             "no_trade": int(year_df["exit_reason"].str.contains("No Breakout", na=False).sum())
         })
@@ -522,14 +535,21 @@ def analyze_performance_summary(results_df):
         print("\nNo trades available for performance analysis.")
         return
 
+    gross_profit = float(traded[traded["points"] > 0]["points"].sum())
+    gross_loss = float(abs(traded[traded["points"] < 0]["points"].sum()))
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else float('inf')
+
     print("\n" + "=" * 120)
-    print("STRATEGY PERFORMANCE SUMMARY (100% POSITION WITH 0.5x TARGET 1 BE TRAIL)")
+    print("STRATEGY PERFORMANCE SUMMARY (1-MINUTE RESOLUTION - NO LOOK-AHEAD BIAS)")
     print("=" * 120)
-    print(f"Total Traded Days : {len(traded)}")
+    print(f"Total Traded Days                     : {len(traded)}")
     wins = int((traded["result"] == "Win").sum())
     win_rate = (wins / len(traded) * 100) if len(traded) else 0.0
-    print(f"Winning Trades    : {wins} ({win_rate:.2f}%)")
-    print(f"Total Points      : {traded['points'].sum():.2f}")
+    print(f"Winning Trades                        : {wins} ({win_rate:.2f}%)")
+    print(f"Total Positive Points (Gross Profit)  : {gross_profit:.2f}")
+    print(f"Total Negative Points (Gross Loss)    : {gross_loss:.2f}")
+    print(f"Profit Factor                         : {profit_factor}")
+    print(f"Total Net Points                      : {traded['points'].sum():.2f}")
     print("=" * 120)
 
 
@@ -544,11 +564,11 @@ def main():
         current_year = now_ist.year
 
         print("\n" + "=" * 100)
-        print("NIFTY 50 ORB STRATEGY + 100% BREAK-EVEN TRAIL AT 0.5x TARGET 1")
+        print("NIFTY 50 ORB STRATEGY (1-MINUTE INTRA-CANDLE PRECISION)")
         print("=" * 100)
         print(f"Start year      : {START_YEAR}")
         print(f"Current year    : {current_year}")
-        print(f"Min ORB Range % : {MIN_ORB_RANGE_PCT}%")
+        print(f"Interval        : {INTERVAL}")
         print("=" * 100)
 
         smart_api = login_to_smartapi()
@@ -610,6 +630,10 @@ def main():
         losses = int((traded["result"] == "Loss").sum())
         total_trades = len(traded)
         overall_win_rate = (wins / total_trades * 100) if total_trades else 0.0
+        
+        gross_profit = float(traded[traded["points"] > 0]["points"].sum())
+        gross_loss = float(abs(traded[traded["points"] < 0]["points"].sum()))
+        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else float('inf')
         overall_points = float(traded["points"].sum())
 
         filtered_days = int(results_df["exit_reason"].str.contains("Filtered", na=False).sum())
@@ -617,7 +641,7 @@ def main():
         stop_loss_hits = int(results_df["exit_reason"].str.contains("Stop/BE Hit", na=False).sum())
 
         print("\n" + "=" * 90)
-        print(f"OVERALL SUMMARY REPORT: {START_YEAR} TO {current_year}")
+        print(f"OVERALL SUMMARY REPORT (1-MIN): {START_YEAR} TO {current_year}")
         print("=" * 90)
         print(f"Total Trading Days Analyzed       : {len(results_df)}")
         print(f"Days within Expected ORB Range    : {valid_orb_days}")
@@ -628,7 +652,10 @@ def main():
         print(f"Losing Trades                     : {losses}")
         print(f"Stop/BE Hits                      : {stop_loss_hits}")
         print(f"Overall Win Rate (%)              : {overall_win_rate:.2f}%")
-        print(f"Total Points Captured             : {overall_points:.2f}")
+        print(f"Total Positive Points (Gross)     : {gross_profit:.2f}")
+        print(f"Total Negative Points (Gross)     : {gross_loss:.2f}")
+        print(f"Profit Factor                     : {profit_factor}")
+        print(f"Total Points Captured (Net)       : {overall_points:.2f}")
         print("=" * 90)
 
         analyze_performance_summary(results_df)
