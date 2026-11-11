@@ -18,12 +18,12 @@ CLIENT_CODE = "AAAD431807"
 PASSWORD = "1606"
 TOTP_SECRET = "H2FHHI2DVFW5HK64J3GQWMVZ3E"
 
-EXCHANGE = "NSE"
-SYMBOL_TOKEN = "99926000"  # NIFTY 50
+#EXCHANGE = "NSE"
+#SYMBOL_TOKEN = "99926000"  # NIFTY 50
 #EXCHANGE = "BSE"
 #SYMBOL_TOKEN = "99919000"  # SENSEX
-#EXCHANGE = "NSE"
-#SYMBOL_TOKEN = "99926009"  # BANK NIFTY
+EXCHANGE = "NSE"
+SYMBOL_TOKEN = "99926009"  # BANK NIFTY
 
 INTERVAL = "ONE_MINUTE"    # Switched to 1-minute candles for precise intra-candle execution
 
@@ -378,7 +378,7 @@ def analyze_day(trading_date, day_df):
     entry_price = float(entry_candle.iloc[0]["close"])
     entry_time = TRADE_ENTRY_TIME
 
-    # Initial Stop Loss Setup (Updated based on new user conditions)
+    # Initial Stop Loss Setup
     if breakout_type == "BUY":
         if entry_price > orb_high:
             stop_loss = float(orb_midpoint)
@@ -412,7 +412,7 @@ def analyze_day(trading_date, day_df):
     exit_price = None
     exit_reason = "EOD Square-off"
     current_stop = stop_loss
-    highest_multiplier_reached = 0.5  # Track milestones starting from 0.5
+    highest_multiplier_reached = 0.3  # Track milestones starting from Target 1 (0.3)
 
     for _, row in holding_candles.iterrows():
         c_close = row["close"]
@@ -423,18 +423,18 @@ def analyze_day(trading_date, day_df):
         if breakout_type == "BUY":
             favorable_move_mult = (c_high - entry_price) / orb_range if orb_range > 0 else 0
 
-            # 1. Check if Target 1 (0.5) is hit for the first time
-            if not target_1_hit and favorable_move_mult >= 0.5:
+            # 1. Check if Target 1 (0.3) is hit for the first time
+            if not target_1_hit and favorable_move_mult >= 0.3:
                 target_1_hit = True
                 current_stop = entry_price  # Move to break-even
 
-            # 2. Once Target 1 is hit, check for higher 0.1 step milestones (0.6, 0.7, 0.8, 0.9, 1.0...)
+            # 2. Once Target 1 is hit, check for higher 0.1 step milestones (0.4, 0.5, 0.6, 0.7, 0.8...)
             if target_1_hit:
-                current_mult_tier = 0.5 + int((favorable_move_mult - 0.5) / 0.1) * 0.1
+                current_mult_tier = 0.3 + int((favorable_move_mult - 0.3) / 0.1) * 0.1
                 
                 if current_mult_tier > highest_multiplier_reached:
                     highest_multiplier_reached = current_mult_tier
-                    lock_in_offset = (highest_multiplier_reached - 0.5) * orb_range
+                    lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price + lock_in_offset
 
             # Check if stop loss is hit by current candle close
@@ -446,16 +446,16 @@ def analyze_day(trading_date, day_df):
         else: # SELL
             favorable_move_mult = (entry_price - c_low) / orb_range if orb_range > 0 else 0
 
-            if not target_1_hit and favorable_move_mult >= 0.5:
+            if not target_1_hit and favorable_move_mult >= 0.3:
                 target_1_hit = True
                 current_stop = entry_price  # Move to break-even
 
             if target_1_hit:
-                current_mult_tier = 0.5 + int((favorable_move_mult - 0.5) / 0.1) * 0.1
+                current_mult_tier = 0.3 + int((favorable_move_mult - 0.3) / 0.1) * 0.1
                 
                 if current_mult_tier > highest_multiplier_reached:
                     highest_multiplier_reached = current_mult_tier
-                    lock_in_offset = (highest_multiplier_reached - 0.5) * orb_range
+                    lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price - lock_in_offset
 
             if c_close >= current_stop:
