@@ -36,7 +36,7 @@ RETRY_BASE_SECONDS = 2
 
 ORB_START_TIME = time(9, 15)
 ORB_END_TIME = time(9, 45)
-TRADE_SCAN_START_TIME = time(9, 50)  # Scan starts after 9:45 candle
+TRADE_SCAN_START_TIME = time(9, 50)   # Scan starts after 9:45 candle
 TRADE_DEADLINE_TIME = time(12, 0)    # Scan deadline at 12:00
 TRADE_ENTRY_TIME = time(14, 0)       # Take trade at 14:00 if breakout happened
 EXIT_TIME = time(15, 0)
@@ -75,14 +75,24 @@ def login_to_smartapi():
 
 
 # ============================================================
-# TIMESTAMP CONVERSION
+# VECTORIZED TIMESTAMP CONVERSION
 # ============================================================
 
-def convert_to_ist(value):
-    timestamp = pd.Timestamp(value)
-    if timestamp.tzinfo is None:
-        return timestamp.tz_localize(IST)
-    return timestamp.tz_convert(IST)
+def convert_dataframe_to_ist(df):
+    if df.empty or "timestamp" not in df.columns:
+        return df
+    
+    # Parse to datetime if not already
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["timestamp"]).copy()
+    
+    # Vectorized timezone localization/conversion
+    if df["timestamp"].dt.tz is None:
+        df["timestamp"] = df["timestamp"].dt.tz_localize(IST, ambiguous="NaT", nonexistent="shift_forward")
+    else:
+        df["timestamp"] = df["timestamp"].dt.tz_convert(IST)
+        
+    return df
 
 
 # ============================================================
@@ -113,10 +123,8 @@ def fetch_historical_data(smart_api, from_date, to_date):
                 if not data:
                     return pd.DataFrame(columns=CANDLE_COLUMNS)
 
-                return pd.DataFrame(
-                    data,
-                    columns=CANDLE_COLUMNS
-                )
+                df = pd.DataFrame(data, columns=CANDLE_COLUMNS)
+                return convert_dataframe_to_ist(df)
 
             last_error = RuntimeError(
                 f"Historical API response: {response}"
@@ -137,7 +145,7 @@ def fetch_historical_data(smart_api, from_date, to_date):
 
 
 # ============================================================
-# FETCH ONE YEAR, MONTH BY MONTH
+# FETCH ONE YEAR, MONTH BY MONTH (WITH CHUNKING SAFETY)
 # ============================================================
 
 def fetch_year_historical_data(smart_api, year, now_ist):
@@ -213,12 +221,6 @@ def fetch_year_historical_data(smart_api, year, now_ist):
                 })
                 continue
 
-            month_df["timestamp"] = pd.to_datetime(
-                month_df["timestamp"], errors="coerce"
-            )
-            month_df = month_df.dropna(subset=["timestamp"]).copy()
-            month_df["timestamp"] = month_df["timestamp"].apply(convert_to_ist)
-
             month_df = month_df[
                 (month_df["timestamp"].dt.year == year)
                 & (month_df["timestamp"].dt.month == month)
@@ -268,7 +270,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
     combined_df = pd.concat(all_data, ignore_index=True)
     combined_df = combined_df.drop_duplicates(subset=["timestamp"], keep="first")
     combined_df = combined_df.sort_values("timestamp").reset_index(drop=True)
-    combined_df["timestamp"] = combined_df["timestamp"].apply(convert_to_ist)
+    combined_df = convert_dataframe_to_ist(combined_df)
     combined_df = combined_df[combined_df["timestamp"] <= now_ist].copy()
 
     print(f"\nTotal candles for {year}: {len(combined_df)}")
@@ -276,7 +278,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
 
 
 # ============================================================
-# ANALYZE ONE TRADING DAY (UPDATED FOR 100% POSITION BE TRAIL)
+# ANALYZE ONE TRADING DAY (UPDATED WITH SOLUTION 1 BREAKOUT)
 # ============================================================
 
 def analyze_day(trading_date, day_df):
@@ -338,7 +340,7 @@ def analyze_day(trading_date, day_df):
         result_row["exit_reason"] = f"ORB Range {orb_range_pct:.2f}% < {MIN_ORB_RANGE_PCT}% (Filtered)"
         return result_row
 
-    # 1. Scan for breakout strictly between 9:50 and 12:00
+    # 1. Scan for breakout strictly between 9:50 and 12:00 using Solution 1 (High/Low Piercing)
     scan_candles = day_df[
         (day_df["time_obj"] >= TRADE_SCAN_START_TIME) & 
         (day_df["time_obj"] <= TRADE_DEADLINE_TIME)
@@ -346,12 +348,15 @@ def analyze_day(trading_date, day_df):
 
     breakout_type = None
     for _, row in scan_candles.iterrows():
-        c_close = row["close"]
+        c_high = row["high"]
+        c_low = row["low"]
 
-        if c_close > orb_high:
+        if c_high > orb_high and c_low < orb_low:
+            continue  # Ambiguous bar piercing both sides
+        elif c_high > orb_high:
             breakout_type = "BUY"
             break
-        elif c_close < orb_low:
+        elif c_low < orb_low:
             breakout_type = "SELL"
             break
 
@@ -398,12 +403,10 @@ def analyze_day(trading_date, day_df):
         h_time = row["time_obj"]
 
         if breakout_type == "BUY":
-            # Check Target 1 (0.5x ORB Range) to move 100% stop to break-even
             if not target_1_hit and c_high >= target_1_price:
                 target_1_hit = True
                 current_stop = entry_price  # Move entire position stop to break-even
 
-            # Check stop loss / breakeven hit
             if c_close <= current_stop:
                 exit_price = float(current_stop)
                 exit_reason = f"Stop/BE Hit at {h_time} (Stop: {current_stop})"
@@ -561,7 +564,7 @@ def main():
             if raw_df.empty:
                 continue
 
-            raw_df["timestamp"] = raw_df["timestamp"].apply(convert_to_ist)
+            raw_df = convert_dataframe_to_ist(raw_df)
             raw_df = raw_df.sort_values("timestamp").copy()
 
             raw_df["trading_date"] = raw_df["timestamp"].dt.date
