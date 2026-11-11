@@ -378,11 +378,21 @@ def analyze_day(trading_date, day_df):
     entry_price = float(entry_candle.iloc[0]["close"])
     entry_time = TRADE_ENTRY_TIME
 
-    # Initial Stop Loss & Target 1 Setup
+    # Initial Stop Loss Setup (Updated based on new user conditions)
     if breakout_type == "BUY":
-        stop_loss = float(orb_low)
-    else:
-        stop_loss = float(orb_high)
+        if entry_price > orb_high:
+            stop_loss = float(orb_midpoint)
+        elif orb_low <= entry_price <= orb_high:
+            stop_loss = float(orb_low)
+        else:
+            stop_loss = float(orb_low)  # Fallback if below ORB low
+    else:  # SELL
+        if entry_price < orb_low:
+            stop_loss = float(orb_midpoint)
+        elif orb_low <= entry_price <= orb_high:
+            stop_loss = float(orb_high)
+        else:
+            stop_loss = float(orb_high)  # Fallback if above ORB high
 
     result_row["trade_type"] = breakout_type
     result_row["entry_time"] = str(entry_time)
