@@ -8,7 +8,7 @@ URL = (
     "OpenAPI_File/files/OpenAPIScripMaster.json"
 )
 
-OUT = Path("AngelOne_Instruments")
+OUT = Path("Options_Instrumentation")
 OUT.mkdir(parents=True, exist_ok=True)
 
 

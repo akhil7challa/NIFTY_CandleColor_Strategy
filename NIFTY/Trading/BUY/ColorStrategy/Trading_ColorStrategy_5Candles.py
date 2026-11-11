@@ -28,8 +28,8 @@ TOTP_SECRET = "H2FHHI2DVFW5HK64J3GQWMVZ3E"
 LIVE_TRADING = "YES"
 
 INSTRUMENT_MASTER = Path(
-    r"C:\Users\challa\Desktop\Challa\Personal\NIFTY"
-    r"\AngelOne_Instruments\nifty_current_expiry.csv"
+    r"C:\Users\challa\Desktop\Challa\Personal\NSE\NIFTY"
+    r"\AngelOne_Instruments\Options_Instrumentation\nifty_current_expiry.csv"
 )
 
 STATE_FILE = Path("nifty_live_state.json")
