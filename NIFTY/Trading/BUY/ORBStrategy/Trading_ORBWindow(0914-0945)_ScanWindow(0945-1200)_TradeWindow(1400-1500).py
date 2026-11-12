@@ -8,6 +8,7 @@ from datetime import datetime, date, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import numpy as np
 import pyotp
 from SmartApi import SmartConnect
 
@@ -18,27 +19,37 @@ from SmartApi import SmartConnect
 
 IST = ZoneInfo("Asia/Kolkata")
 
-API_KEY = os.getenv("SMARTAPI_API_KEY", "MpxkUXqu")
-CLIENT_CODE = os.getenv("SMARTAPI_CLIENT_CODE", "AAAD431807")
-PASSWORD = os.getenv("SMARTAPI_PASSWORD", "1606")
-TOTP_SECRET = os.getenv("SMARTAPI_TOTP_SECRET", "H2FHHI2DVFW5HK64J3GQWMVZ3E")
+API_KEY = "MpxkUXqu"
+CLIENT_CODE = "AAAD431807"
+PASSWORD = "1606"
+TOTP_SECRET = "H2FHHI2DVFW5HK64J3GQWMVZ3E"
 
-# Set to True for actual live orders, False for paper trading mode.
-LIVE_TRADING = False
+# "YES" = actual live orders, "NO" = paper mode.
+LIVE_TRADING = "YES"
 
-EXCHANGE = "NSE"
-SYMBOL_TOKEN = "99926009"  # BANK NIFTY (or change to 99926000 for NIFTY 50)
-INTERVAL = "ONE_MINUTE"
+INSTRUMENT_MASTER = Path(
+    r"C:\Users\challa\Desktop\Challa\Personal\NSE\NIFTY"
+    r"\AngelOne_Instruments\Options_Instrumentation\nifty_current_expiry.csv"
+)
 
-STATE_FILE = Path("orb_live_state.json")
-TRADE_LOG = Path("orb_live_trades.csv")
-LOG_FILE = Path("orb_live.log")
+STATE_FILE = Path("nifty_orb_live_state.json")
+TRADE_LOG = Path("nifty_orb_live_trades.csv")
+LOG_FILE = Path("nifty_orb_live.log")
 
+SPOT_EXCHANGE = "NSE"
+SPOT_SYMBOL = "Nifty 50"
+SPOT_TOKEN = "99926000"
+
+OPTION_EXCHANGE = "NFO"
+CANDLE_INTERVAL = "ONE_MINUTE"
+
+LOTS = 1
 PRODUCT_TYPE = "INTRADAY"
-POLL_SECONDS = 5
+
+POLL_SECONDS = 15
 FILL_TIMEOUT_SECONDS = 30
 
-# Strategy Timings
+# Strategy Times (IST)
 ORB_START_TIME = dt_time(9, 15)
 ORB_END_TIME = dt_time(9, 45)
 TRADE_SCAN_START_TIME = dt_time(9, 50)
@@ -47,7 +58,14 @@ TRADE_ENTRY_TIME = dt_time(14, 0)
 EXIT_TIME = dt_time(15, 0)
 MIN_ORB_RANGE_PCT = 0.0
 
-CANDLE_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+CSV_TOKEN = "symboltoken"
+CSV_SYMBOL = "tradingsymbol"
+CSV_NAME = "name"
+CSV_EXPIRY = "expiry"
+CSV_STRIKE = "strike"
+CSV_LOTSIZE = "lotsize"
+CSV_TYPE = "instrumenttype"
+CSV_EXCHANGE = "exchange"
 
 
 # ============================================================
@@ -63,7 +81,7 @@ logging.basicConfig(
     ],
 )
 
-log = logging.getLogger("orb_strategy")
+log = logging.getLogger("nifty_orb_strategy")
 
 
 # ============================================================
@@ -87,14 +105,14 @@ def load_state():
     with STATE_FILE.open("r", encoding="utf-8") as file:
         state = json.load(file)
     if not isinstance(state, dict):
-        raise RuntimeError("Invalid state file. Inspect positions before restarting.")
+        raise RuntimeError("Invalid state file.")
     return state
 
 
 def log_trade(**details):
     record = {
         "time": now_ist().isoformat(),
-        "mode": "LIVE" if LIVE_TRADING else "PAPER",
+        "mode": "LIVE" if LIVE_TRADING == "YES" else "PAPER",
         **details,
     }
     frame = pd.DataFrame([record])
@@ -117,7 +135,6 @@ def require_credentials():
 
 
 def api_read(fn, *args, **kwargs):
-    """Retry read-only API requests safely."""
     last_error = None
     for attempt in range(1, 4):
         try:
@@ -133,7 +150,7 @@ def api_read(fn, *args, **kwargs):
 
 
 # ============================================================
-# SMARTAPI LOGIN
+# ANGEL ONE LOGIN
 # ============================================================
 
 def login():
@@ -145,70 +162,168 @@ def login():
     if not isinstance(response, dict) or not response.get("status") or not response.get("data"):
         raise RuntimeError(f"Login failed: {response}")
 
-    log.info("SmartAPI login successful.")
+    log.info("Angel One login successful.")
     return api
 
 
 # ============================================================
-# DATA HANDLING & TIMESTAMP CONVERSION
+# CSV INSTRUMENT MASTER & ITM OPTION SELECTOR
 # ============================================================
 
-def convert_dataframe_to_ist(df):
-    if df.empty or "timestamp" not in df.columns:
-        return df
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df = df.dropna(subset=["timestamp"]).copy()
-    if df["timestamp"].dt.tz is None:
-        df["timestamp"] = df["timestamp"].dt.tz_localize(IST, ambiguous="NaT", nonexistent="shift_forward")
-    else:
-        df["timestamp"] = df["timestamp"].dt.tz_convert(IST)
-    return df
+def find_column(df, override, candidates, description):
+    if override:
+        if override not in df.columns:
+            raise ValueError(f"Configured {description} column '{override}' not found.")
+        return override
+    normalize = lambda value: "".join(ch for ch in str(value).lower() if ch.isalnum())
+    columns = {normalize(col): col for col in df.columns}
+    for candidate in candidates:
+        key = normalize(candidate)
+        if key in columns:
+            return columns[key]
+    raise ValueError(f"Cannot detect the {description} column.")
 
 
-def fetch_intraday_candles(api, trading_day):
+def load_instruments():
+    if not INSTRUMENT_MASTER.exists():
+        raise FileNotFoundError(f"Instrument CSV not found: {INSTRUMENT_MASTER}")
+
+    df = pd.read_csv(INSTRUMENT_MASTER, dtype=str, sep=None, engine="python")
+    df.columns = [str(col).strip() for col in df.columns]
+
+    columns = {
+        "token": find_column(df, CSV_TOKEN, ["token", "symboltoken", "symbol_token", "instrument_token"], "token"),
+        "symbol": find_column(df, CSV_SYMBOL, ["symbol", "tradingsymbol", "trading_symbol"], "symbol"),
+        "name": find_column(df, CSV_NAME, ["name", "underlying", "underlyingsymbol"], "underlying name"),
+        "expiry": find_column(df, CSV_EXPIRY, ["expiry", "expirydate", "expiry_date"], "expiry"),
+        "strike": find_column(df, CSV_STRIKE, ["strike", "strikeprice", "strike_price"], "strike"),
+        "lotsize": find_column(df, CSV_LOTSIZE, ["lotsize", "lot_size", "marketlot"], "lot size"),
+        "type": find_column(df, CSV_TYPE, ["instrumenttype", "instrument_type"], "instrument type"),
+        "exchange": find_column(df, CSV_EXCHANGE, ["exch_seg", "exchange", "exchange_segment"], "exchange"),
+    }
+
+    data = pd.DataFrame({
+        "token": df[columns["token"]].fillna("").astype(str).str.strip(),
+        "symbol": df[columns["symbol"]].fillna("").astype(str).str.strip(),
+        "name": df[columns["name"]].fillna("").astype(str).str.upper().str.strip(),
+        "expiry_raw": df[columns["expiry"]].fillna("").astype(str).str.strip(),
+        "strike_raw": df[columns["strike"]].fillna("").astype(str).str.strip(),
+        "lotsize_raw": df[columns["lotsize"]].fillna("").astype(str).str.strip(),
+        "type": df[columns["type"]].fillna("").astype(str).str.upper().str.strip(),
+        "exchange": df[columns["exchange"]].fillna("").astype(str).str.upper().str.strip(),
+    })
+
+    data["expiry"] = pd.to_datetime(data["expiry_raw"], errors="coerce", dayfirst=True).dt.date
+    data["strike"] = pd.to_numeric(data["strike_raw"], errors="coerce")
+
+    if not data["strike"].dropna().empty and data["strike"].dropna().median() > 100000:
+        data["strike"] = data["strike"] / 100.0
+
+    data["lot_size"] = pd.to_numeric(data["lotsize_raw"], errors="coerce")
+
+    options = data[
+        (data["name"].eq("NIFTY") | data["symbol"].str.upper().str.startswith("NIFTY"))
+        & (data["type"].eq("OPTIDX") | data["symbol"].str.upper().str.endswith(("CE", "PE")))
+        & data["exchange"].eq("NFO")
+        & data["expiry"].notna()
+        & data["strike"].notna()
+        & (data["strike"] > 0)
+        & (data["lot_size"] > 0)
+        & data["token"].ne("")
+    ].copy()
+
+    log.info("Eligible NIFTY option contracts loaded: %d", len(options))
+    return options
+
+
+def select_itm_contract(instruments, spot, breakout_type, today):
+    option_type = "CE" if breakout_type == "BUY" else "PE"
+
+    eligible = instruments[
+        (instruments["expiry"] >= today)
+        & instruments["symbol"].str.upper().str.endswith(option_type)
+    ].copy()
+
+    if eligible.empty:
+        raise RuntimeError(f"No unexpired NIFTY {option_type} contracts found.")
+
+    expiry = min(eligible["expiry"])
+    eligible = eligible[eligible["expiry"] == expiry]
+
+    strikes = sorted(eligible["strike"].dropna().unique().tolist())
+    atm_strike = min(strikes, key=lambda val: abs(float(val) - float(spot)))
+    atm_strike = float(atm_strike)
+
+    target_strike = (atm_strike - 100) if option_type == "CE" else (atm_strike + 100)
+
+    selected = eligible[eligible["strike"].astype(float) == target_strike]
+    if len(selected) != 1:
+        raise RuntimeError(f"Expected 1 contract for expiry {expiry}, ATM={atm_strike}, Target ITM={target_strike} {option_type}.")
+
+    row = selected.iloc[0]
+    return {
+        "symbol": row["symbol"],
+        "token": row["token"],
+        "exchange": OPTION_EXCHANGE,
+        "expiry": expiry.isoformat(),
+        "strike": target_strike,
+        "option_type": option_type,
+        "lot_size": int(row["lot_size"]),
+        "quantity": int(row["lot_size"]) * LOTS,
+    }
+
+
+# ============================================================
+# TIMEZONE-SAFE CANDLE FETCHING
+# ============================================================
+
+def fetch_candles(api, exchange, token, trading_day):
     start = datetime.combine(trading_day, dt_time(9, 0), tzinfo=IST)
     end = min(now_ist(), datetime.combine(trading_day, dt_time(15, 30), tzinfo=IST))
 
     params = {
-        "exchange": EXCHANGE,
-        "symboltoken": SYMBOL_TOKEN,
-        "interval": INTERVAL,
+        "exchange": exchange,
+        "symboltoken": token,
+        "interval": CANDLE_INTERVAL,
         "fromdate": start.strftime("%Y-%m-%d %H:%M"),
         "todate": end.strftime("%Y-%m-%d %H:%M"),
     }
 
     response = api_read(api.getCandleData, params)
     rows = response.get("data") if isinstance(response, dict) else None
-
     if rows is None:
-        raise RuntimeError(f"Historical candle request failed: {response}")
-    if not rows:
-        return pd.DataFrame(columns=CANDLE_COLUMNS)
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-    df = pd.DataFrame(rows, columns=CANDLE_COLUMNS)
-    df = convert_dataframe_to_ist(df)
+    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["timestamp"]).copy()
+    
+    if df["timestamp"].dt.tz is None:
+        df["timestamp"] = df["timestamp"].dt.tz_localize(IST, ambiguous="NaT", nonexistent="shift_forward")
+    else:
+        df["timestamp"] = df["timestamp"].dt.tz_convert(IST)
+
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    return df.dropna(subset=["timestamp", "open", "high", "low", "close"]).sort_values("timestamp").reset_index(drop=True)
+    return df.sort_values("timestamp").reset_index(drop=True)
 
 
 # ============================================================
-# ORDER EXECUTION
+# ORDER MANAGEMENT
 # ============================================================
 
-def place_order(api, side, quantity, reason, state):
-    if not LIVE_TRADING:
-        log.warning("PAPER MODE: %s quantity=%s | reason=%s", side, quantity, reason)
-        result = {"order_id": "PAPER", "average_price": 0.0, "quantity": quantity}
-        state["pending_order"] = {"side": side, "quantity": quantity, "reason": reason, "status": "SIMULATED"}
-        save_state(state)
-        log_trade(action=side, quantity=quantity, reason=reason, status="SIMULATED")
-        return result
+def place_order(api, contract, side, state, reason):
+    if LIVE_TRADING != "YES":
+        log.warning("PAPER MODE: %s %s qty=%s | reason=%s", side, contract["symbol"], contract["quantity"], reason)
+        log_trade(action=side, symbol=contract["symbol"], quantity=contract["quantity"], reason=reason, status="SIMULATED")
+        return {"order_id": "PAPER", "average_price": 100.0, "quantity": contract["quantity"]}
 
     state["pending_order"] = {
         "side": side,
-        "quantity": quantity,
+        "symbol": contract["symbol"],
+        "token": contract["token"],
+        "quantity": contract["quantity"],
         "reason": reason,
         "status": "SUBMITTING",
         "time": now_ist().isoformat(),
@@ -217,230 +332,275 @@ def place_order(api, side, quantity, reason, state):
 
     params = {
         "variety": "NORMAL",
-        "tradingsymbol": "BANKNIFTY",  # Update based on instrument choice
-        "symboltoken": SYMBOL_TOKEN,
+        "tradingsymbol": contract["symbol"],
+        "symboltoken": contract["token"],
         "transactiontype": side,
-        "exchange": EXCHANGE,
+        "exchange": OPTION_EXCHANGE,
         "ordertype": "MARKET",
         "producttype": PRODUCT_TYPE,
         "duration": "DAY",
         "price": "0",
         "squareoff": "0",
         "stoploss": "0",
-        "quantity": str(quantity),
-        "ordertag": "ORB1MIN",
+        "quantity": str(contract["quantity"]),
+        "ordertag": "NIFTYORB",
     }
 
-    try:
-        response = api.placeOrderFullResponse(params)
-    except Exception as exc:
-        state["pending_order"]["status"] = "SUBMISSION_UNCONFIRMED"
-        save_state(state)
-        raise RuntimeError("Order submission uncertain.") from exc
-
+    response = api.placeOrderFullResponse(params)
     if not isinstance(response, dict) or not response.get("status"):
-        state["pending_order"]["status"] = "SUBMISSION_UNCONFIRMED"
-        save_state(state)
-        raise RuntimeError(f"Order not confirmed: {response}")
+        raise RuntimeError(f"Order submission failed: {response}")
 
     data = response.get("data") or {}
-    order_id = data.get("orderid") or data.get("orderId")
-    state["pending_order"]["order_id"] = str(order_id)
+    order_id = str(data.get("orderid") or data.get("orderId"))
+    state["pending_order"]["order_id"] = order_id
     state["pending_order"]["status"] = "SUBMITTED"
     save_state(state)
 
-    # Verify fill
     deadline = time.time() + FILL_TIMEOUT_SECONDS
     while time.time() < deadline:
-        book = api_read(api.orderBook)
-        for order in (book.get("data") or []):
-            if str(order.get("orderid", order.get("orderId"))) == str(order_id):
-                status = str(order.get("orderstatus", order.get("status"))).lower()
+        book_response = api_read(api.orderBook)
+        for order in (book_response.get("data") or []):
+            if str(order.get("orderid", order.get("orderId", ""))) == order_id:
+                status = str(order.get("orderstatus", order.get("status", ""))).lower()
                 filled = int(float(order.get("filledshares") or 0))
-                if status in {"complete", "completed", "filled"} or filled >= quantity:
+                if status in {"rejected", "cancelled"}:
+                    raise RuntimeError(f"Order {order_id} {status}")
+                if filled >= contract["quantity"] or status in {"complete", "filled"}:
                     avg_price = float(order.get("averageprice") or 0)
                     state["pending_order"]["status"] = "FILLED"
                     save_state(state)
-                    log_trade(action=side, quantity=quantity, order_id=str(order_id), average_price=avg_price, status="FILLED")
-                    return {"order_id": str(order_id), "average_price": avg_price, "quantity": quantity}
+                    log_trade(action=side, symbol=contract["symbol"], quantity=contract["quantity"], order_id=order_id, average_price=avg_price, reason=reason, status="FILLED")
+                    return {"order_id": order_id, "average_price": avg_price, "quantity": contract["quantity"]}
         time.sleep(2)
 
-    raise RuntimeError(f"Fill timeout for order {order_id}.")
+    raise RuntimeError(f"Fill timeout for order {order_id}")
 
 
 # ============================================================
-# LIVE STRATEGY LOOP
+# MAIN STRATEGY EXECUTION
 # ============================================================
 
-def run_strategy(api, state):
+def run_strategy(api, instruments, state):
     today = now_ist().date()
     today_key = today.isoformat()
 
     if state.get("trade_date") == today_key and state.get("day_status") in {"EXITED", "NO_TRADE"}:
-        log.info("Strategy for today already finished.")
+        log.info("Strategy already completed for today.")
+        return
+
+    if state.get("position_status") == "OPEN":
+        log.warning("OPEN position detected in state file. Resuming management loop...")
+        contract = state.get("contract")
+        breakout_type = state.get("breakout_type")
+        entry_order = state.get("entry_order", {})
+        entry_price = float(entry_order.get("average_price", 100.0))
+        
+        manage_open_position(api, contract, breakout_type, entry_price, today, state)
         return
 
     market_open = datetime.combine(today, dt_time(9, 15), tzinfo=IST)
     while now_ist() < market_open:
         time.sleep(POLL_SECONDS)
 
-    log.info("Waiting for ORB formation (09:15 - 09:45)...")
-    while now_ist().time() < dt_time(9, 46):
+    # 1. ORB Window (9:15 to 9:45): Spot Index ORB
+    orb_deadline = datetime.combine(today, dt_time(9, 46), tzinfo=IST)
+    while now_ist() < orb_deadline:
         time.sleep(POLL_SECONDS)
 
-    # Fetch morning data to calculate ORB
-    df = fetch_intraday_candles(api, today)
-    df["time_obj"] = df["timestamp"].dt.time
-    orb_candles = df[(df["time_obj"] >= ORB_START_TIME) & (df["time_obj"] <= ORB_END_TIME)]
+    spot_df = fetch_candles(api, SPOT_EXCHANGE, SPOT_TOKEN, today)
+    spot_df["time_obj"] = spot_df["timestamp"].dt.time
 
-    if len(orb_candles) < 15:
-        log.warning("Insufficient ORB candles. Aborting today.")
-        state.update({"trade_date": today_key, "day_status": "NO_TRADE"})
-        save_state(state)
-        return
-
-    day_open = float(df.iloc[0]["open"])
-    orb_high = orb_candles["high"].max()
-    orb_low = orb_candles["low"].min()
-    orb_midpoint = (orb_high + orb_low) / 2.0
+    orb_candles = spot_df[(spot_df["time_obj"] >= ORB_START_TIME) & (spot_df["time_obj"] <= ORB_END_TIME)]
+    orb_high = float(orb_candles["high"].max())
+    orb_low = float(orb_candles["low"].min())
+    day_open = float(spot_df.iloc[0]["open"])
     orb_range = orb_high - orb_low
-    orb_range_pct = (orb_range / day_open) * 100
 
-    log.info("ORB High: %.2f | Low: %.2f | Range Pct: %.2f%%", orb_high, orb_low, orb_range_pct)
-
-    if orb_range_pct < MIN_ORB_RANGE_PCT:
+    if (orb_range / day_open) * 100 < MIN_ORB_RANGE_PCT:
         state.update({"trade_date": today_key, "day_status": "NO_TRADE"})
         save_state(state)
+        log.info("ORB Range filtered out.")
         return
 
-    # Scan for Breakout between 9:50 and 12:00
+    # 2. ScanWindow (9:50 to 12:00): Spot Index Breakout
     breakout_type = None
-    log.info("Scanning for breakout between 09:50 and 12:00...")
+    scan_end = datetime.combine(today, TRADE_DEADLINE_TIME, tzinfo=IST)
 
-    while now_ist().time() < TRADE_DEADLINE_TIME:
-        df = fetch_intraday_candles(api, today)
-        df["time_obj"] = df["timestamp"].dt.time
-        scan_candles = df[(df["time_obj"] >= TRADE_SCAN_START_TIME) & (df["time_obj"] <= now_ist().time())]
+    while now_ist() < scan_end and not breakout_type:
+        current_spot_df = fetch_candles(api, SPOT_EXCHANGE, SPOT_TOKEN, today)
+        if not current_spot_df.empty:
+            current_spot_df["time_obj"] = current_spot_df["timestamp"].dt.time
+            scan_candles = current_spot_df[
+                (current_spot_df["time_obj"] >= TRADE_SCAN_START_TIME) &
+                (current_spot_df["time_obj"] <= TRADE_DEADLINE_TIME)
+            ]
 
-        for _, row in scan_candles.iterrows():
-            if row["high"] > orb_high and row["low"] < orb_low:
-                continue
-            elif row["high"] > orb_high:
-                breakout_type = "BUY"
-                break
-            elif row["low"] < orb_low:
-                breakout_type = "SELL"
-                break
+            for _, row in scan_candles.iterrows():
+                c_high = row["high"]
+                c_low = row["low"]
+                if c_high > orb_high and c_low < orb_low:
+                    continue
+                elif c_high > orb_high:
+                    breakout_type = "BUY"
+                    break
+                elif c_low < orb_low:
+                    breakout_type = "SELL"
+                    break
 
         if breakout_type:
             break
-        time.sleep(30)
-
-    if not breakout_type:
-        log.info("No breakout detected by deadline. No trade today.")
-        state.update({"trade_date": today_key, "day_status": "NO_TRADE"})
-        save_state(state)
-        return
-
-    log.info("Breakout detected: %s. Waiting for entry time 14:00...", breakout_type)
-
-    # Wait until 14:00 entry time
-    entry_target_dt = datetime.combine(today, TRADE_ENTRY_TIME, tzinfo=IST)
-    while now_ist() < entry_target_dt:
         time.sleep(POLL_SECONDS)
 
-    # Get entry reference price and calculate stop loss
-    df = fetch_intraday_candles(api, today)
-    entry_candle = df[df["timestamp"].dt.time == TRADE_ENTRY_TIME]
-    if entry_candle.empty:
-        raise RuntimeError("14:00 Entry candle not found.")
+    if not breakout_type:
+        state.update({"trade_date": today_key, "day_status": "NO_TRADE"})
+        save_state(state)
+        log.info("No breakout detected. No trade.")
+        return
 
-    entry_price = float(entry_candle.iloc[0]["close"])
-    if breakout_type == "BUY":
-        stop_loss = orb_midpoint if entry_price > orb_high else orb_low
-    else:
-        stop_loss = orb_midpoint if entry_price < orb_low else orb_high
+    log.info("Breakout detected on Spot! Type: %s", breakout_type)
 
-    quantity = 15  # Adjust lot size / quantity according to index specifications
-    entry_order = place_order(api, "BUY" if breakout_type == "BUY" else "SELL", quantity, "ORB_ENTRY", state)
+    # 3. TradeWindow (14:00 to 15:00): Entry & ITM ORB Management
+    entry_target_time = datetime.combine(today, TRADE_ENTRY_TIME, tzinfo=IST)
+    while now_ist() < entry_target_time:
+        time.sleep(POLL_SECONDS)
+
+    spot_at_entry = float(fetch_candles(api, SPOT_EXCHANGE, SPOT_TOKEN, today).iloc[-1]["close"])
+    contract = select_itm_contract(instruments, spot_at_entry, breakout_type, today)
 
     state.update({
         "trade_date": today_key,
         "day_status": "POSITION_OPEN",
         "breakout_type": breakout_type,
-        "entry_price": entry_price,
-        "stop_loss": stop_loss,
+        "contract": contract,
     })
     save_state(state)
 
-    # Holding Period / Trailing Stop Loop (14:00 to 15:00)
-    current_stop = stop_loss
+    entry_order = place_order(api, contract, "BUY", state, f"ORB_{breakout_type}_ENTRY")
+    entry_price = entry_order["average_price"]
+    state["entry_order"] = entry_order
+    state["position_status"] = "OPEN"
+    save_state(state)
+
+    manage_open_position(api, contract, breakout_type, entry_price, today, state)
+
+
+def manage_open_position(api, contract, breakout_type, entry_price, today, state):
+    exit_time_dt = datetime.combine(today, EXIT_TIME, tzinfo=IST)
+    
+    # FETCH ITM OPTION ORB LEVELS (9:15 to 9:45) for stop loss & trailing
+    itm_df = fetch_candles(api, OPTION_EXCHANGE, contract["token"], today)
+    itm_df["time_obj"] = itm_df["timestamp"].dt.time
+    itm_orb_candles = itm_df[(itm_df["time_obj"] >= ORB_START_TIME) & (itm_df["time_obj"] <= ORB_END_TIME)]
+    
+    if not itm_orb_candles.empty:
+        itm_orb_high = float(itm_orb_candles["high"].max())
+        itm_orb_low = float(itm_orb_candles["low"].min())
+        itm_orb_midpoint = (itm_orb_high + itm_orb_low) / 2.0
+        itm_orb_range = itm_orb_high - itm_orb_low
+    else:
+        itm_orb_range = entry_price * 0.1
+        itm_orb_midpoint = entry_price - (0.5 * itm_orb_range)
+
+    # Initial Stop Loss based on ITM ORB Midpoint / Range structure
+    current_stop = itm_orb_midpoint if breakout_type == "BUY" else itm_orb_midpoint
     target_1_hit = False
-    highest_mult = 0.3
+    highest_mult_reached = 0.3
+    last_check_minute = -1
+    exit_reason = "EOD Square-off"
+    last_processed_timestamp = None
 
-    log.info("Position open. Managing trailing stops until 15:00...")
-    while now_ist().time() < EXIT_TIME:
-        df = fetch_intraday_candles(api, today)
-        df["time_obj"] = df["timestamp"].dt.time
-        holding = df[(df["time_obj"] > TRADE_ENTRY_TIME) & (df["time_obj"] <= now_ist().time())]
+    while now_ist() <= exit_time_dt:
+        itm_df = fetch_candles(api, OPTION_EXCHANGE, contract["token"], today)
+        if itm_df.empty:
+            time.sleep(POLL_SECONDS)
+            continue
 
-        exit_triggered = False
-        for _, row in holding.iterrows():
-            c_close, c_high, c_low = row["close"], row["high"], row["low"]
+        latest_candle = itm_df.iloc[-1]
+        candle_ts = latest_candle["timestamp"]
+
+        if candle_ts != last_processed_timestamp:
+            last_processed_timestamp = candle_ts
+            c_close = latest_candle["close"]
+            c_high = latest_candle["high"]
+            c_low = latest_candle["low"]
+            h_time = candle_ts.time()
 
             if breakout_type == "BUY":
-                fav_move = (c_high - entry_price) / orb_range if orb_range > 0 else 0
-                if not target_1_hit and fav_move >= 0.3:
+                fav_move_mult = (c_high - entry_price) / itm_orb_range if itm_orb_range > 0 else 0
+
+                if not target_1_hit and fav_move_mult >= 0.3:
                     target_1_hit = True
                     current_stop = entry_price
+
                 if target_1_hit:
-                    tier = 0.3 + int((fav_move - 0.3) / 0.1) * 0.1
-                    if tier > highest_mult:
-                        highest_mult = tier
-                        current_stop = entry_price + (highest_mult - 0.3) * orb_range
+                    current_mult_tier = 0.3 + int((fav_move_mult - 0.3) / 0.1) * 0.1
+                    if current_mult_tier > highest_mult_reached:
+                        highest_mult_reached = current_mult_tier
+                        lock_in_offset = (highest_mult_reached - 0.3) * itm_orb_range
+                        current_stop = entry_price + lock_in_offset
+
+                # Unconditional 5-minute ratchet
+                if current_stop < entry_price:
+                    if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
+                        last_check_minute = h_time.minute
+                        current_stop += (0.05 * itm_orb_range)
+                        if current_stop > entry_price:
+                            current_stop = entry_price
 
                 if c_close <= current_stop:
-                    exit_triggered = True
+                    exit_reason = f"ITM Trailing Stop Hit (Stop: {current_stop:.2f})"
                     break
-            else:
-                fav_move = (entry_price - c_low) / orb_range if orb_range > 0 else 0
-                if not target_1_hit and fav_move >= 0.3:
+
+            else:  # SELL (PE)
+                fav_move_mult = (entry_price - c_low) / itm_orb_range if itm_orb_range > 0 else 0
+
+                if not target_1_hit and fav_move_mult >= 0.3:
                     target_1_hit = True
                     current_stop = entry_price
+
                 if target_1_hit:
-                    tier = 0.3 + int((fav_move - 0.3) / 0.1) * 0.1
-                    if tier > highest_mult:
-                        highest_mult = tier
-                        current_stop = entry_price - (highest_mult - 0.3) * orb_range
+                    current_mult_tier = 0.3 + int((fav_move_mult - 0.3) / 0.1) * 0.1
+                    if current_mult_tier > highest_mult_reached:
+                        highest_mult_reached = current_mult_tier
+                        lock_in_offset = (highest_mult_reached - 0.3) * itm_orb_range
+                        current_stop = entry_price - lock_in_offset
+
+                if current_stop > entry_price:
+                    if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
+                        last_check_minute = h_time.minute
+                        current_stop -= (0.05 * itm_orb_range)
+                        if current_stop < entry_price:
+                            current_stop = entry_price
 
                 if c_close >= current_stop:
-                    exit_triggered = True
+                    exit_reason = f"ITM Trailing Stop Hit (Stop: {current_stop:.2f})"
                     break
 
-        if exit_triggered:
-            break
-        time.sleep(15)
+        time.sleep(POLL_SECONDS)
 
-    # Square off at EOD or Trailing Stop hit
-    exit_side = "SELL" if breakout_type == "BUY" else "BUY"
-    place_order(api, exit_side, quantity, "ORB_EXIT", state)
-
-    state.update({"day_status": "EXITED"})
+    exit_order = place_order(api, contract, "SELL", state, exit_reason)
+    state.update({
+        "day_status": "EXITED",
+        "exit_reason": exit_reason,
+        "position_status": "CLOSED",
+        "exit_order": exit_order,
+    })
     save_state(state)
-    log.info("Strategy day completed and exited.")
+    log.info("Strategy execution completed. Exit reason: %s", exit_reason)
 
 
 # ============================================================
-# MAIN
+# MAIN ENTRYPOINT
 # ============================================================
 
 def main():
-    log.info("Starting live ORB strategy runner...")
+    log.info("Starting NIFTY ORB Strategy in %s mode.", "LIVE" if LIVE_TRADING == "YES" else "PAPER")
+    instruments = load_instruments()
     api = None
     try:
         api = login()
         state = load_state()
-        run_strategy(api, state)
+        run_strategy(api, instruments, state)
     finally:
         if api is not None:
             try:
