@@ -258,7 +258,6 @@ def fetch_year_historical_data(smart_api, year, now_ist):
                 "error": "",
             })
 
-            # Add a small polite sleep delay to prevent gateway rate-limiting
             time_module.sleep(0.4)
 
         except Exception as exc:
@@ -444,15 +443,13 @@ def analyze_day(trading_date, day_df):
                     lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price + lock_in_offset
 
-            # 3. 5-minute trailing requirement
+            # 3. 5-minute time-based ratchet (unconditional movement when stop is below entry)
             if current_stop < entry_price:
                 if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
                     last_check_minute = h_time.minute
-                    distance_to_stop = c_close - current_stop
-                    if distance_to_stop > (0.10 * orb_range):
-                        current_stop += (0.05 * orb_range)
-                        if current_stop > entry_price:
-                            current_stop = entry_price
+                    current_stop += (0.05 * orb_range)
+                    if current_stop > entry_price:
+                        current_stop = entry_price
 
             # Check if stop loss is hit by current candle close
             if c_close <= current_stop:
@@ -475,15 +472,13 @@ def analyze_day(trading_date, day_df):
                     lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price - lock_in_offset
 
-            # 3. 5-minute trailing requirement for SELL
+            # 3. 5-minute time-based ratchet for SELL (unconditional movement when stop is above entry)
             if current_stop > entry_price:
                 if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
                     last_check_minute = h_time.minute
-                    distance_to_stop = current_stop - c_close
-                    if distance_to_stop > (0.10 * orb_range):
-                        current_stop -= (0.05 * orb_range)
-                        if current_stop < entry_price:
-                            current_stop = entry_price
+                    current_stop -= (0.05 * orb_range)
+                    if current_stop < entry_price:
+                        current_stop = entry_price
 
             if c_close >= current_stop:
                 exit_price = float(current_stop)
