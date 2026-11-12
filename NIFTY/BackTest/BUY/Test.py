@@ -413,6 +413,8 @@ def analyze_day(trading_date, day_df):
     exit_reason = "EOD Square-off"
     current_stop = stop_loss
     highest_multiplier_reached = 0.3  # Track milestones starting from Target 1 (0.3)
+    
+    last_check_minute = -1  # Used for 5-minute interval trigger checks
 
     for _, row in holding_candles.iterrows():
         c_close = row["close"]
@@ -437,6 +439,17 @@ def analyze_day(trading_date, day_df):
                     lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price + lock_in_offset
 
+            # 3. 5-minute trailing requirement:
+            # If stop loss has NOT reached/exceeded entry point yet, check every 5 minutes.
+            if current_stop < entry_price:
+                if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
+                    last_check_minute = h_time.minute
+                    distance_to_stop = c_close - current_stop
+                    if distance_to_stop > (0.10 * orb_range):
+                        current_stop += (0.05 * orb_range)
+                        if current_stop > entry_price:
+                            current_stop = entry_price
+
             # Check if stop loss is hit by current candle close
             if c_close <= current_stop:
                 exit_price = float(current_stop)
@@ -457,6 +470,16 @@ def analyze_day(trading_date, day_df):
                     highest_multiplier_reached = current_mult_tier
                     lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price - lock_in_offset
+
+            # 3. 5-minute trailing requirement for SELL:
+            if current_stop > entry_price:
+                if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
+                    last_check_minute = h_time.minute
+                    distance_to_stop = current_stop - c_close
+                    if distance_to_stop > (0.10 * orb_range):
+                        current_stop -= (0.05 * orb_range)
+                        if current_stop < entry_price:
+                            current_stop = entry_price
 
             if c_close >= current_stop:
                 exit_price = float(current_stop)
@@ -481,6 +504,90 @@ def analyze_day(trading_date, day_df):
     result_row["result"] = "Win" if points > 0 else ("Loss" if points < 0 else "Breakeven")
 
     return result_row
+
+
+# ============================================================
+# CALCULATE CONSECUTIVE STREAKS (WINS & LOSSES)
+# ============================================================
+
+def calculate_streaks(traded_df):
+    max_win_streak = 0
+    max_win_streak_points = 0.0
+    max_win_dates = (None, None)
+
+    max_loss_streak = 0
+    max_loss_streak_points = 0.0
+    max_loss_dates = (None, None)
+
+    curr_win_streak = 0
+    curr_win_points = 0.0
+    curr_win_start = None
+
+    curr_loss_streak = 0
+    curr_loss_points = 0.0
+    curr_loss_start = None
+
+    for _, row in traded_df.iterrows():
+        res = row["result"]
+        pts = float(row["points"])
+        dt_str = row["date"].strftime("%Y-%m-%d")
+
+        if res == "Win":
+            # Reset loss streak
+            curr_loss_streak = 0
+            curr_loss_points = 0.0
+            curr_loss_start = None
+
+            # Update win streak
+            if curr_win_streak == 0:
+                curr_win_start = dt_str
+            curr_win_streak += 1
+            curr_win_points += pts
+
+            if curr_win_streak > max_win_streak or (
+                curr_win_streak == max_win_streak and curr_win_points > max_win_streak_points
+            ):
+                max_win_streak = curr_win_streak
+                max_win_streak_points = curr_win_points
+                max_win_dates = (curr_win_start, dt_str)
+
+        elif res == "Loss":
+            # Reset win streak
+            curr_win_streak = 0
+            curr_win_points = 0.0
+            curr_win_start = None
+
+            # Update loss streak
+            if curr_loss_streak == 0:
+                curr_loss_start = dt_str
+            curr_loss_streak += 1
+            curr_loss_points += pts
+
+            if curr_loss_streak > max_loss_streak or (
+                curr_loss_streak == max_loss_streak and curr_loss_points < max_loss_streak_points
+            ):
+                max_loss_streak = curr_loss_streak
+                max_loss_streak_points = curr_loss_points
+                max_loss_dates = (curr_loss_start, dt_str)
+
+        else:
+            # Breakeven resets both consecutive streaks
+            curr_win_streak = 0
+            curr_win_points = 0.0
+            curr_win_start = None
+
+            curr_loss_streak = 0
+            curr_loss_points = 0.0
+            curr_loss_start = None
+
+    return {
+        "max_win_streak": max_win_streak,
+        "max_win_streak_points": round(max_win_streak_points, 2),
+        "max_win_dates": max_win_dates,
+        "max_loss_streak": max_loss_streak,
+        "max_loss_streak_points": round(max_loss_streak_points, 2),
+        "max_loss_dates": max_loss_dates,
+    }
 
 
 # ============================================================
@@ -661,7 +768,7 @@ def main():
         # ========================================================
         # DETAILED OVERALL PERFORMANCE BREAKDOWN
         # ========================================================
-        traded = results_df[results_df["result"].isin(["Win", "Loss", "Breakeven"])]
+        traded = results_df[results_df["result"].isin(["Win", "Loss", "Breakeven"])].copy()
         wins = int((traded["result"] == "Win").sum())
         losses = int((traded["result"] == "Loss").sum())
         total_trades = len(traded)
@@ -675,6 +782,11 @@ def main():
         filtered_days = int(results_df["exit_reason"].str.contains("Filtered", na=False).sum())
         valid_orb_days = int((~results_df["exit_reason"].str.contains("Filtered|No Data|Insufficient", na=False)).sum())
         stop_loss_hits = int(results_df["exit_reason"].str.contains("Trailing Stop Hit", na=False).sum())
+
+        # Calculate consecutive streaks
+        streaks = calculate_streaks(traded)
+        win_dates_str = f"({streaks['max_win_dates'][0]} to {streaks['max_win_dates'][1]})" if streaks['max_win_streak'] > 0 else ""
+        loss_dates_str = f"({streaks['max_loss_dates'][0]} to {streaks['max_loss_dates'][1]})" if streaks['max_loss_streak'] > 0 else ""
 
         print("\n" + "=" * 90)
         print(f"OVERALL SUMMARY REPORT (1-MIN): {START_YEAR} TO {current_year}")
@@ -692,6 +804,9 @@ def main():
         print(f"Total Negative Points (Gross)     : {gross_loss:.2f}")
         print(f"Profit Factor                     : {profit_factor}")
         print(f"Total Points Captured (Net)       : {overall_points:.2f}")
+        print("-" * 90)
+        print(f"Max Consecutive Wins              : {streaks['max_win_streak']} trades | +{streaks['max_win_streak_points']:.2f} pts {win_dates_str}")
+        print(f"Max Consecutive Losses            : {streaks['max_loss_streak']} trades | {streaks['max_loss_streak_points']:.2f} pts {loss_dates_str}")
         print("=" * 90)
 
         analyze_performance_summary(results_df)
