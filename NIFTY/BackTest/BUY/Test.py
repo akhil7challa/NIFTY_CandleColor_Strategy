@@ -5,6 +5,7 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import numpy as np
 import pyotp
 from SmartApi import SmartConnect
 
@@ -34,6 +35,7 @@ START_YEAR = 2015
 
 MAX_RETRIES = 4
 RETRY_BASE_SECONDS = 2
+
 
 # ============================================================
 # STRATEGY RULES
@@ -256,6 +258,9 @@ def fetch_year_historical_data(smart_api, year, now_ist):
                 "error": "",
             })
 
+            # Add a small polite sleep delay to prevent gateway rate-limiting
+            time_module.sleep(0.4)
+
         except Exception as exc:
             error_text = str(exc)
             print(f"   ERROR: {error_text}")
@@ -430,7 +435,7 @@ def analyze_day(trading_date, day_df):
                 target_1_hit = True
                 current_stop = entry_price  # Move to break-even
 
-            # 2. Once Target 1 is hit, check for higher 0.1 step milestones (0.4, 0.5, 0.6, 0.7, 0.8...)
+            # 2. Once Target 1 is hit, check for higher 0.1 step milestones
             if target_1_hit:
                 current_mult_tier = 0.3 + int((favorable_move_mult - 0.3) / 0.1) * 0.1
                 
@@ -439,8 +444,7 @@ def analyze_day(trading_date, day_df):
                     lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price + lock_in_offset
 
-            # 3. 5-minute trailing requirement:
-            # If stop loss has NOT reached/exceeded entry point yet, check every 5 minutes.
+            # 3. 5-minute trailing requirement
             if current_stop < entry_price:
                 if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
                     last_check_minute = h_time.minute
@@ -471,7 +475,7 @@ def analyze_day(trading_date, day_df):
                     lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price - lock_in_offset
 
-            # 3. 5-minute trailing requirement for SELL:
+            # 3. 5-minute trailing requirement for SELL
             if current_stop > entry_price:
                 if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
                     last_check_minute = h_time.minute
@@ -533,12 +537,10 @@ def calculate_streaks(traded_df):
         dt_str = row["date"].strftime("%Y-%m-%d")
 
         if res == "Win":
-            # Reset loss streak
             curr_loss_streak = 0
             curr_loss_points = 0.0
             curr_loss_start = None
 
-            # Update win streak
             if curr_win_streak == 0:
                 curr_win_start = dt_str
             curr_win_streak += 1
@@ -552,12 +554,10 @@ def calculate_streaks(traded_df):
                 max_win_dates = (curr_win_start, dt_str)
 
         elif res == "Loss":
-            # Reset win streak
             curr_win_streak = 0
             curr_win_points = 0.0
             curr_win_start = None
 
-            # Update loss streak
             if curr_loss_streak == 0:
                 curr_loss_start = dt_str
             curr_loss_streak += 1
@@ -571,7 +571,6 @@ def calculate_streaks(traded_df):
                 max_loss_dates = (curr_loss_start, dt_str)
 
         else:
-            # Breakeven resets both consecutive streaks
             curr_win_streak = 0
             curr_win_points = 0.0
             curr_win_start = None
@@ -588,6 +587,38 @@ def calculate_streaks(traded_df):
         "max_loss_streak_points": round(max_loss_streak_points, 2),
         "max_loss_dates": max_loss_dates,
     }
+
+
+# ============================================================
+# ADVANCED METRICS: SHARPE RATIO & MAX DRAWDOWN
+# ============================================================
+
+def analyze_advanced_metrics(results_df):
+    traded = results_df[results_df["result"].isin(["Win", "Loss", "Breakeven"])].copy()
+    if traded.empty:
+        return
+
+    # Cumulative Returns / Equity Curve in Points
+    traded["cumulative_points"] = traded["points"].cumsum()
+    
+    # 1. Maximum Drawdown (MDD) in Points
+    running_max = traded["cumulative_points"].cummax()
+    drawdown = traded["cumulative_points"] - running_max
+    max_drawdown = drawdown.min()
+    
+    # 2. Daily/Trade Sharpe Ratio Approximation
+    mean_points = traded["points"].mean()
+    std_points = traded["points"].std()
+    sharpe_ratio = (mean_points / std_points) * np.sqrt(252) if std_points > 0 else 0.0
+
+    print("\n" + "=" * 90)
+    print("ADVANCED RISK-ADJUSTED PERFORMANCE METRICS")
+    print("=" * 90)
+    print(f"Maximum Drawdown (MDD)         : {max_drawdown:.2f} points")
+    print(f"Average Trade Return           : {mean_points:.2f} points")
+    print(f"Standard Deviation per Trade   : {std_points:.2f} points")
+    print(f"Annualized Sharpe Ratio        : {sharpe_ratio:.2f}")
+    print("=" * 90)
 
 
 # ============================================================
@@ -810,6 +841,9 @@ def main():
         print("=" * 90)
 
         analyze_performance_summary(results_df)
+        
+        # Run advanced risk-adjusted metrics
+        analyze_advanced_metrics(results_df)
 
     except Exception as exc:
         print(f"\nERROR: {exc}")
