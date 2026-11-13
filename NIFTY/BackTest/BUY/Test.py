@@ -25,8 +25,10 @@ SYMBOL_TOKEN = "99926000"  # NIFTY 50
 #SYMBOL_TOKEN = "99919000"  # SENSEX
 #EXCHANGE = "NSE"
 #SYMBOL_TOKEN = "99926009"  # BANK NIFTY
+#EXCHANGE = "NSE"
+#SYMBOL_TOKEN = "3045"  # BANK NIFTY
 
-INTERVAL = "ONE_MINUTE"    # Switched to 1-minute candles for precise intra-candle execution
+INTERVAL = "ONE_MINUTE"    # 1-minute candles for precise intra-candle execution
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -45,8 +47,8 @@ ORB_START_TIME = time(9, 15)
 ORB_END_TIME = time(9, 45)
 TRADE_SCAN_START_TIME = time(9, 50)   # Scan starts after 9:45 candle
 TRADE_DEADLINE_TIME = time(12, 0)    # Scan deadline at 12:00
-TRADE_ENTRY_TIME = time(14, 0)       # Take trade at 14:00 if breakout happened
-EXIT_TIME = time(15, 0)
+TRADE_ENTRY_TIME = time(15, 10)       # Take trade at 15:10 if breakout happened
+EXIT_TIME = time(15, 15)            # Exit at 15:15 (EOD Square-off)
 MIN_ORB_RANGE_PCT = 0.0  # Minimum range required filter percentage
 
 CANDLE_COLUMNS = [
@@ -287,7 +289,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
 
 
 # ============================================================
-# ANALYZE ONE TRADING DAY (USING 1-MIN FOR ACCURATE EXECUTION)
+# ANALYZE ONE TRADING DAY
 # ============================================================
 
 def analyze_day(trading_date, day_df):
@@ -373,10 +375,10 @@ def analyze_day(trading_date, day_df):
     if not breakout_type:
         return result_row
 
-    # 2. Check 14:00 entry candle existence
+    # 2. Check 15:00 entry candle existence
     entry_candle = day_df[day_df["time_obj"] == TRADE_ENTRY_TIME]
     if entry_candle.empty:
-        result_row["exit_reason"] = "No 14:00 Entry Candle"
+        result_row["exit_reason"] = "No 15:00 Entry Candle"
         return result_row
 
     entry_price = float(entry_candle.iloc[0]["close"])
@@ -389,14 +391,14 @@ def analyze_day(trading_date, day_df):
         elif orb_low <= entry_price <= orb_high:
             stop_loss = float(orb_low)
         else:
-            stop_loss = float(orb_low)  # Fallback if below ORB low
+            stop_loss = float(orb_low)
     else:  # SELL
         if entry_price < orb_low:
             stop_loss = float(orb_midpoint)
         elif orb_low <= entry_price <= orb_high:
             stop_loss = float(orb_high)
         else:
-            stop_loss = float(orb_high)  # Fallback if above ORB high
+            stop_loss = float(orb_high)
 
     result_row["trade_type"] = breakout_type
     result_row["entry_time"] = str(entry_time)
@@ -417,8 +419,6 @@ def analyze_day(trading_date, day_df):
     exit_reason = "EOD Square-off"
     current_stop = stop_loss
     highest_multiplier_reached = 0.3  # Track milestones starting from Target 1 (0.3)
-    
-    last_check_minute = -1  # Used for 5-minute interval trigger checks
 
     for _, row in holding_candles.iterrows():
         c_close = row["close"]
@@ -443,14 +443,6 @@ def analyze_day(trading_date, day_df):
                     lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price + lock_in_offset
 
-            # 3. 5-minute time-based ratchet (unconditional movement when stop is below entry)
-            if current_stop < entry_price:
-                if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
-                    last_check_minute = h_time.minute
-                    current_stop += (0.05 * orb_range)
-                    if current_stop > entry_price:
-                        current_stop = entry_price
-
             # Check if stop loss is hit by current candle close
             if c_close <= current_stop:
                 exit_price = float(current_stop)
@@ -472,14 +464,6 @@ def analyze_day(trading_date, day_df):
                     lock_in_offset = (highest_multiplier_reached - 0.3) * orb_range
                     current_stop = entry_price - lock_in_offset
 
-            # 3. 5-minute time-based ratchet for SELL (unconditional movement when stop is above entry)
-            if current_stop > entry_price:
-                if h_time.minute % 5 == 0 and h_time.minute != last_check_minute:
-                    last_check_minute = h_time.minute
-                    current_stop -= (0.05 * orb_range)
-                    if current_stop < entry_price:
-                        current_stop = entry_price
-
             if c_close >= current_stop:
                 exit_price = float(current_stop)
                 exit_reason = f"Trailing Stop Hit at {h_time} (Stop: {current_stop:.2f}, Tier: {highest_multiplier_reached:.1f})"
@@ -491,7 +475,7 @@ def analyze_day(trading_date, day_df):
         else:
             exit_price = entry_price
 
-    # Calculate points for 100% position
+    # Calculate points for position
     if breakout_type == "BUY":
         points = exit_price - entry_price
     else:
@@ -593,15 +577,12 @@ def analyze_advanced_metrics(results_df):
     if traded.empty:
         return
 
-    # Cumulative Returns / Equity Curve in Points
     traded["cumulative_points"] = traded["points"].cumsum()
     
-    # 1. Maximum Drawdown (MDD) in Points
     running_max = traded["cumulative_points"].cummax()
     drawdown = traded["cumulative_points"] - running_max
     max_drawdown = drawdown.min()
     
-    # 2. Daily/Trade Sharpe Ratio Approximation
     mean_points = traded["points"].mean()
     std_points = traded["points"].std()
     sharpe_ratio = (mean_points / std_points) * np.sqrt(252) if std_points > 0 else 0.0
@@ -791,9 +772,6 @@ def main():
         print("=" * 130)
         print(yearly_df.to_string(index=False))
 
-        # ========================================================
-        # DETAILED OVERALL PERFORMANCE BREAKDOWN
-        # ========================================================
         traded = results_df[results_df["result"].isin(["Win", "Loss", "Breakeven"])].copy()
         wins = int((traded["result"] == "Win").sum())
         losses = int((traded["result"] == "Loss").sum())
@@ -809,7 +787,6 @@ def main():
         valid_orb_days = int((~results_df["exit_reason"].str.contains("Filtered|No Data|Insufficient", na=False)).sum())
         stop_loss_hits = int(results_df["exit_reason"].str.contains("Trailing Stop Hit", na=False).sum())
 
-        # Calculate consecutive streaks
         streaks = calculate_streaks(traded)
         win_dates_str = f"({streaks['max_win_dates'][0]} to {streaks['max_win_dates'][1]})" if streaks['max_win_streak'] > 0 else ""
         loss_dates_str = f"({streaks['max_loss_dates'][0]} to {streaks['max_loss_dates'][1]})" if streaks['max_loss_streak'] > 0 else ""
@@ -836,8 +813,6 @@ def main():
         print("=" * 90)
 
         analyze_performance_summary(results_df)
-        
-        # Run advanced risk-adjusted metrics
         analyze_advanced_metrics(results_df)
 
     except Exception as exc:
