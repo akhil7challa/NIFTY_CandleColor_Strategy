@@ -26,7 +26,7 @@ SYMBOL_TOKEN = "99926000"  # NIFTY 50
 #EXCHANGE = "NSE"
 #SYMBOL_TOKEN = "99926009"  # BANK NIFTY
 #EXCHANGE = "NSE"
-#SYMBOL_TOKEN = "3045"  # BANK NIFTY
+#SYMBOL_TOKEN = "1333"  # Equity Stock
 
 INTERVAL = "ONE_MINUTE"    # 1-minute candles for precise intra-candle execution
 
