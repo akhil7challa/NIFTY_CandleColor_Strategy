@@ -47,8 +47,8 @@ ORB_START_TIME = time(9, 15)
 ORB_END_TIME = time(9, 45)
 TRADE_SCAN_START_TIME = time(9, 50)   # Scan starts after 9:45 candle
 TRADE_DEADLINE_TIME = time(12, 0)    # Scan deadline at 12:00
-TRADE_ENTRY_TIME = time(15, 10)       # Take trade at 15:10 if breakout happened
-EXIT_TIME = time(15, 15)            # Exit at 15:15 (EOD Square-off)
+TRADE_ENTRY_TIME = time(15, 9)       # Take trade at 15:10 if breakout happened
+EXIT_TIME = time(15, 14)            # Exit at 15:15 (EOD Square-off)
 MIN_ORB_RANGE_PCT = 0.0  # Minimum range required filter percentage
 
 CANDLE_COLUMNS = [
