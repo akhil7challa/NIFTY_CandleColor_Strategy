@@ -30,7 +30,7 @@ SYMBOL_TOKEN = "99926000"  # NIFTY 50
 
 INTERVAL = "ONE_MINUTE"
 IST = ZoneInfo("Asia/Kolkata")
-START_YEAR = 2015
+START_YEAR = 2026
 
 MAX_RETRIES = 4
 RETRY_BASE_SECONDS = 2
@@ -128,7 +128,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
     today = now_ist.date()
 
     print("\n" + "=" * 90)
-    print(f"FETCHING 1-MINUTE NIFTY 50 DATA FOR {year}")
+    print(f"FETCHING 1-MINUTE {SYMBOL_TOKEN} SYMBOL_TOKEN DATA FOR {year}")
     print("=" * 90)
 
     if year > today.year:
