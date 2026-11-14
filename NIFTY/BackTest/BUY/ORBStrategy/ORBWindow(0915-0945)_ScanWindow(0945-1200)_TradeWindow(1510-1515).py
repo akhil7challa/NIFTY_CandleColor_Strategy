@@ -26,7 +26,7 @@ SYMBOL_TOKEN = "99926000"  # NIFTY 50
 #EXCHANGE = "NSE"
 #SYMBOL_TOKEN = "99926009"  # BANK NIFTY
 #EXCHANGE = "NSE"
-#SYMBOL_TOKEN = "1333"  # Equity Stock
+#SYMBOL_TOKEN = "2885"  # Equity Stock
 
 INTERVAL = "ONE_MINUTE"
 IST = ZoneInfo("Asia/Kolkata")
@@ -189,7 +189,7 @@ def fetch_year_historical_data(smart_api, year, now_ist):
 
 
 # ============================================================
-# CORE TRADING LOGIC (STATIC STOP-LOSS)
+# CORE TRADING LOGIC (TRAILING STOP-LOSS)
 # ============================================================
 
 def analyze_day(trading_date, day_df):
@@ -246,28 +246,53 @@ def analyze_day(trading_date, day_df):
     entry_price = float(entry_candle.iloc[0]["close"])
     
     if breakout_type == "BUY":
-        stop_loss = orb_midpoint if entry_price > orb_high else orb_low
+        initial_sl = orb_midpoint if entry_price > orb_high else orb_low
     else:
-        stop_loss = orb_midpoint if entry_price < orb_low else orb_high
+        initial_sl = orb_midpoint if entry_price < orb_low else orb_high
 
-    result_row.update({"trade_type": breakout_type, "entry_time": str(TRADE_ENTRY_TIME), "entry_price": entry_price, "stop_loss": stop_loss})
+    current_stop_loss = initial_sl
+    initial_risk_distance = abs(entry_price - initial_sl)
+    trailing_step = initial_risk_distance * 0.20
+
+    result_row.update({
+        "trade_type": breakout_type, 
+        "entry_time": str(TRADE_ENTRY_TIME), 
+        "entry_price": entry_price, 
+        "stop_loss": initial_sl
+    })
 
     holding_candles = day_df[(day_df["time_obj"] > TRADE_ENTRY_TIME) & (day_df["time_obj"] <= EXIT_TIME)]
     exit_price, exit_reason = None, "EOD Square-off"
 
     for _, row in holding_candles.iterrows():
-        if breakout_type == "BUY" and row["close"] <= stop_loss:
-            exit_price, exit_reason = float(stop_loss), f"Stop Loss Hit at {row['time_obj']}"
+        # 1. Check if current trailing stop-loss is hit on this minute's close
+        if breakout_type == "BUY" and row["close"] <= current_stop_loss:
+            exit_price, exit_reason = float(current_stop_loss), f"Trailing Stop Loss Hit at {row['time_obj']}"
             break
-        elif breakout_type == "SELL" and row["close"] >= stop_loss:
-            exit_price, exit_reason = float(stop_loss), f"Stop Loss Hit at {row['time_obj']}"
+        elif breakout_type == "SELL" and row["close"] >= current_stop_loss:
+            exit_price, exit_reason = float(current_stop_loss), f"Trailing Stop Loss Hit at {row['time_obj']}"
             break
+
+        # 2. Ratchet stop-loss 20% of initial risk distance closer to entry on each 1-min close
+        if breakout_type == "BUY":
+            new_sl = current_stop_loss + trailing_step
+            if new_sl <= entry_price:
+                current_stop_loss = new_sl
+        else:
+            new_sl = current_stop_loss - trailing_step
+            if new_sl >= entry_price:
+                current_stop_loss = new_sl
 
     if exit_price is None:
         exit_price = float(holding_candles.iloc[-1]["close"]) if not holding_candles.empty else entry_price
 
     points = (exit_price - entry_price) if breakout_type == "BUY" else (entry_price - exit_price)
-    result_row.update({"exit_price": round(exit_price, 2), "exit_reason": exit_reason, "points": round(points, 2), "result": "Win" if points > 0 else ("Loss" if points < 0 else "Breakeven")})
+    result_row.update({
+        "exit_price": round(exit_price, 2), 
+        "exit_reason": exit_reason, 
+        "points": round(points, 2), 
+        "result": "Win" if points > 0 else ("Loss" if points < 0 else "Breakeven")
+    })
 
     return result_row
 
@@ -329,9 +354,9 @@ def analyze_advanced_metrics(results_df):
     print("\n" + "=" * 90)
     print("ADVANCED RISK-ADJUSTED PERFORMANCE METRICS")
     print("=" * 90)
-    print(f"Maximum Drawdown (MDD)         : {max_drawdown:.2f} points")
-    print(f"Average Trade Return           : {mean_pts:.2f} points")
-    print(f"Standard Deviation per Trade   : {std_pts:.2f} points")
+    print(f"Maximum Drawdown (MDD)       : {max_drawdown:.2f} points")
+    print(f"Average Trade Return         : {mean_pts:.2f} points")
+    print(f"Standard Deviation per Trade : {std_pts:.2f} points")
     print(f"Annualized Sharpe Ratio        : {sharpe_ratio:.2f}")
     print("=" * 90)
 
@@ -467,7 +492,7 @@ def main():
         print("=" * 90)
 
         print("\n" + "=" * 120)
-        print("STRATEGY PERFORMANCE SUMMARY (1-MINUTE RESOLUTION - STATIC STOP-LOSS)")
+        print("STRATEGY PERFORMANCE SUMMARY (1-MINUTE RESOLUTION - TRAILING STOP-LOSS)")
         print("=" * 120)
         print(f"Total Traded Days                     : {len(traded)}")
         print(f"Winning Trades                        : {wins} ({overall_win_rate:.2f}%)")
